@@ -4,178 +4,25 @@ const axios = require('axios');
 const FormData = require('form-data');
 const app = express();
 require('dotenv').config()
-const stripe = require('stripe')(process.env.STRIPE_TEST_KEY);
+const { MODERATION_API_USER, MODERATION_API_SECRET, STRIPE_TEST_KEY, EXPO_TOKEN, SERVICE_ACCOUNT_PATH,
+  DATABASE_URL, STORAGE_BUCKET, CLIENT_ID, CLIENT_SECRET
+} = process.env;
+const stripe = require('stripe')(STRIPE_TEST_KEY);
 const {Expo} = require('expo-server-sdk')
-let expo = new Expo({ accessToken: process.env.EXPO_TOKEN });
+let expo = new Expo({ accessToken: EXPO_TOKEN });
 const cors = require('cors');
 var langdetect = require('langdetect');
-var sightengine = require('sightengine')(process.env.MODERATION_API_USER, process.env.MODERATION_API_SECRET);
+var sightengine = require('sightengine')(MODERATION_API_USER, MODERATION_API_SECRET);
 const { initializeApp, cert } = require('firebase-admin/app');
 const admin = require('firebase-admin')
 const {FieldValue, getFirestore} = require('firebase-admin/firestore')
-const serviceAccount = require(process.env.SERVICE_ACCOUNT_PATH)
+const serviceAccount = require(SERVICE_ACCOUNT_PATH)
 const firebaseApp = initializeApp({
   credential: cert(serviceAccount),
-  databaseURL: process.env.DATABASE_URL,
-  storageBucket: process.env.STORAGE_BUCKET
+  databaseURL: DATABASE_URL,
+  storageBucket: STORAGE_BUCKET
 });
 const db = getFirestore('qadb')
-const db2 = getFirestore()
-const citiesRef = db2.collection('freeThemes');
-function createSearchKeywordsForMultipleWords(field, maxLen, n, limit) {
-  const words = field.split(' ').map(word => word.trim()); // Split the field by spaces and trim spaces
-  const result = new Set(); // Store unique keywords
-  let count = 0; // Counter for added keywords
-
-  // Loop through each word
-  for (const word of words) {
-    // Generate prefixes (from length 1 to maxLen)
-    for (let i = 1; i <= maxLen && i <= word.length && count < limit; i++) {
-      const prefix = word.substring(0, i);
-      result.add(prefix);
-      count++;
-      if (count >= limit) break;
-    }
-
-    // Generate suffixes (from length 1 to maxLen)
-    for (let i = 1; i <= maxLen && i <= word.length && count < limit; i++) {
-      const suffix = word.substring(word.length - i);
-      result.add(suffix);
-      count++;
-      if (count >= limit) break;
-    }
-
-    // Generate n-grams (of length n)
-    for (let i = 0; i <= word.length - n && count < limit; i++) {
-      const ngram = word.substring(i, i + n);
-      result.add(ngram);
-      count++;
-      if (count >= limit) break;
-    }
-
-    if (count >= limit) break;
-  }
-
-  return Array.from(result).slice(0, limit); // Return as an array
-}
-
-// Example usage:
-
-
-function createSearchKeywordsWithHybridTokenization(field, limit) {
-  // Regular expression to match emojis
-  const emojiRegex = /([\u{1F600}-\u{1F64F}]|[\u{1F300}-\u{1F5FF}]|[\u{1F680}-\u{1F6FF}]|[\u{1F700}-\u{1F77F}]|[\u{1F780}-\u{1F7FF}]|[\u{1F800}-\u{1F8FF}]|[\u{1F900}-\u{1F9FF}]|[\u{1FA00}-\u{1FA6F}]|[\u{2600}-\u{26FF}]|[\u{2700}-\u{27BF}]|[\u{1F1E6}-\u{1F1FF}]|[\u{200D}]|[\u{1F004}]|[\u{1F0CF}]|[\u{1F9C0}]|[\u{1F9D0}-\u{1F9FF}]|[\u{1F004}]|[\u{1F0CF}]|[\u{1F004}]|[\u{1F004}])/gu;
-
-  // Remove emojis from the input field
-  const sanitizedField = field.replace(emojiRegex, '');
-
-  const words = sanitizedField.split(',').map(word => word.trim());
-  const shortTokens = new Set();
-  const longTokens = new Set();
-  let shortCount = 0;
-  let longCount = 0;
-
-  // 1. Add whole words to longTokens
-  for (const word of words) {
-    if (longCount < limit) {
-      longTokens.add(word);
-      longCount++;
-    }
-  }
-
-  // 2. Generate n-grams and include edge n-grams in shortTokens
-  const minNgramLength = 3;
-  const maxEdgeNgramLength = 3; // Adjust as needed
-  for (const word of words) {
-    for (let n = word.length; n >= 1 && (shortCount < limit || longCount < limit); n--) {
-      // Edge n-grams (prefixes) up to maxEdgeNgramLength
-      if (n <= maxEdgeNgramLength && shortCount < limit) {
-        const edgeNgram = word.substring(0, n);
-        shortTokens.add(edgeNgram);
-        shortCount++;
-      }
-
-      // Regular n-grams
-      for (let i = 0; i <= word.length - n && (shortCount < limit || longCount < limit); i++) {
-        const ngram = word.substring(i, i + n);
-        if (n <= 3 && shortCount < limit) {
-          shortTokens.add(ngram);
-          shortCount++;
-        } else if (n >= 4 && longCount < limit) {
-          longTokens.add(ngram);
-          longCount++;
-        }
-      }
-    }
-
-    if (shortCount >= limit && longCount >= limit) break;
-  }
-
-  return [Array.from(shortTokens), Array.from(longTokens)];
-}
-const bucket = admin.storage().bucket();
-
-const bruh = async() => {
-  (await citiesRef.get()).forEach(async(e) => {
-    //const docSnap = await db.collection('posts').doc(e.id).get()
-    db.collection('freeThemes').doc(e.id).set({...e.data()})
-  })
-  /* const [files] = await bucket.getFiles();
-  const promises = files.map((file) => file.getMetadata());
-  const metadata = await Promise.all(promises)
-  const filteredMetadata = metadata.filter(meta => 
-      !meta[0].name.startsWith('posts')
-    );
-  filteredMetadata.sort((a, b) => b[0].size - a[0].size); 
-
-    // Now you have the metadata array sorted by file size
-    
-    filteredMetadata.slice(0, 10).forEach(meta => {
-      console.log(`${meta[0].name}: ${meta[0].size} bytes`);
-    }); */
-    
-    /* await db.collection('posts').doc(doc.id).update({
-      comments: docSnap.data().count
-    }) */
-    /* docSnap.forEach(async(e) => {
-      const collectionSnap = await db.collection('profiles').doc(doc.id).collection('purchasedThemes').doc(e.id).get()
-      const text = collectionSnap.data().keywords
-      if (typeof text == 'string') {
-      const keywords = createSearchKeywordsForMultipleWords(text.toLowerCase(), 5, 3, 30);
-    await db.collection('profiles').doc(doc.id).collection('purchasedThemes').doc(e.id).update({
-      searchKeywords: keywords
-    })
-    }
-    }) */
-    //
-    
-    
-    /* if ((await docSnap).data().notificationToken != null) {
-      const notificationToken = (await docSnap).data().notificationToken
-      const snapshot = db.collection('profiles').doc(doc.id).collection('posts').get()
-    if (!snapshot.empty) {
-      (await snapshot).forEach(async(e) => {
-        await db.collection('profiles').doc(doc.id).collection('posts').doc(e.id).update({
-          notificationToken: notificationToken
-        }).then(async() => await db.collection('posts').doc(e.id).update({
-          notificationToken: notificationToken
-        }))
-      })
-    }
-    
-    } */
-    //if (docSna)
-    
-      
-    /* (await docSnap).forEach(async(e) => {
-      console.log(e)
-      
-    
-    }) */
-    
-
-}
-//bruh()
 let accessToken = null;
 let tokenExpirationTime = null;
 const getAccessToken = async () => {
@@ -184,7 +31,7 @@ const getAccessToken = async () => {
     return accessToken;
   }
 
-  const authString = `${process.env.CLIENT_ID}:${process.env.client_secret}`;
+  const authString = `${CLIENT_ID}:${CLIENT_SECRET}`;
   const authBase64 = Buffer.from(authString).toString('base64');
 
   try {
@@ -212,310 +59,79 @@ const getAccessToken = async () => {
   }
 };
 
-//const functions  = getFunctions(getApp())
-// Set the default below to your test phone number or pull it from an environment variable. 
-// In your production code, update the phone number dynamically for each transaction.
-
-//bruh()
 
 
-
-//console.log(db)
-/* for (let i = 1; i <= 20; i++) {
-  let username = faker.internet.userName()
-  let pfp = faker.image.avatar()
-  let firstName = faker.person.firstName()
-  let lastName = faker.person.lastName()
-  db.collection('posts').add({
-    caption: faker.lorem.sentence(),
-    likedBy: [],
-    comments: faker.number.int(100),
-    shares: faker.number.int(100),
-    usersSeen: [],
-    savedBy: [],
-    multiPost: false,
-    username: username,
-    post: faker.image.url(),
-    timestamp: Timestamp.now()
-  })
-  db.collection('usernames').add({
-    pfp: pfp,
-    username: username,
-    firstName: firstName,
-    lastName: lastName
-  })
-  db.collection('profiles').add({
-    bio: faker.person.bio(),
-    background: faker.image.url(),
-    catgories: [faker.lorem.word(), faker.lorem.word(), faker.lorem.word()],
-    education: faker.lorem.words(),
-    interests: [faker.lorem.word(), faker.lorem.word(), faker.lorem.word()],
-    occupation: faker.person.jobTitle(),
-    pfp: faker.image.avatar(),
-    userName: username,
-    firstName: firstName,
-    lastName: lastName,
-    timestamp: Timestamp.now()
-  })
-  db.collection('products').add({
-    name: faker.lorem.word(),
-    default_price_data: {
-        unit_amount: faker.commerce.price(),
-        currency: 'usd',
-        
-    },
-    keywords: faker.lorem.sentence(),
-    images: faker.image.url(),
-    expand: ['default_price'],
-    metadata: {
-      user: faker.database.mongodbObjectId(),
-      userId: '',
-      price: faker.commerce.price()
-    },
-  })
-  db.collection('groups').add({
-    cliqueId: faker.database.mongodbObjectId(),
-        banner: faker.image.url(),
-                    name: faker.lorem.word(),
-                    groupSecurity: 'public',
-                    category: categories[(Math.floor(Math.random() * categories.length))],
-                    description: faker.lorem.sentence(),
-                    pfp: faker.image.avatar(),
-                    members: [],
-                    admins: [],
-                    timestamp: Timestamp.now()
-  })
-} */
-
-//console.log(postFaker.caption())
-/* 
-db.collection('groups').add({
-
-})
-db.collection('products').add({
-
-}) */
-
-app.use(bodyParser.json());
+app.use(express.json());
 app.use(cors({
     origin: 'http://localhost:3000', // Allow requests from this origin
     methods: ['GET', 'POST', 'PUT', 'DELETE'], // Allow these methods
     allowedHeaders: ['Content-Type', 'Authorization'] // Allow these headers
 }));
-app.post('/api/getFreeTheme', async(req, res) => {
-  const data = req.body
-  const userId = data.data.user
-  const keywords = data.data.keywords
-  const searchKeywords = data.data.searchKeywords
-  const name = data.data.name
-  const theme = data.data.theme
-  const productId = data.data.productId
-  const themeId = data.data.themeId
-  const notificationToken = data.data.notificationToken
-  try {
-    const batch = db.batch();
-    const purchasedRef = db.collection('profiles').doc(userId).collection('purchased').doc()
-    const freeRef = db.collection('freeThemes').doc(productId)
-    const profileRef = db.collection('profiles').doc(userId)
-    const notificationsRef = db.collection('profiles').doc(userId).collection('notifications').doc()
-    batch.set(purchasedRef, {
-      active: true,
-      keywords: keywords,
-      searchKeywords: searchKeywords,
-      name: name,
-      images: FieldValue.arrayUnion(theme),
-      price: 0,
-      timestamp: FieldValue.serverTimestamp(),
-      bought: true,
-      productId: productId,
-      selling: true
-    })
-    batch.update(freeRef, {
-      bought_count: FieldValue.increment(1)
-    })
-    batch.update(profileRef, {
-      themeIds: FieldValue.arrayUnion(productId)
-    })
-    batch.set(notificationsRef, {
-      like: false,
-      comment: false,
-      friend: false,
-      item: themeId,
-      request: false,
-      acceptRequest: false,
-      postId: themeId,
-      theme: true,
-      report: false,
-      requestUser: userId,
-      requestNotificationToken: notificationToken,
-      likedBy: [],
-      timestamp: FieldValue.serverTimestamp()
-    })
-    await batch.commit();
-    res.status(200).json({ done: true });
-  } catch (error) {
-    console.error(error)
-    res.status(500).json({ error: 'Failed to add reply to comment.' });
-  }
-})
-app.post('/api/newReplyVideoUsername', async (req, res) => {
-    const data = req.body;
-    const focusedPost = data.data.focusedPost
-    const tempReplyId = data.data.tempReplyId
-    const newReply = data.data.newReply
-    const userId = data.data.user
-    const textModerationURL = data.data.textModerationURL
-  const formData = new FormData();
-    formData.append('text', newReply.reply);
+async function moderateText(text, textModerationURL) {
+    const formData = new FormData();
+    formData.append('text', text);
     formData.append('lang', 'en');
     formData.append('mode', 'standard');
-    formData.append('api_user', `${MODERATION_API_USER}`);
-    formData.append('api_secret', `${MODERATION_API_SECRET}`);
-  
-    Promise.all([axios({
-      url: `${textModerationURL}`,
-      method:'post',
-      data: formData,
-  })]).then(async(response) => {
-    if (response[0].data) {
-      if (response[0].data.link.matches.length > 0) {
-       res.send({link: true})
-    }
-    else if (response[0].data.profanity.matches.length > 0) {
-      const containsValue = response[0].data.profanity.matches.some(obj => obj.intensity === 'high');
-    if (containsValue) {
-        res.send({profanity: true})
-    }
-    }
-    else {
-    try {   
-        const batch = db.batch();
-        const videoCommentRef = db.collection('videos').doc(focusedPost.id).collection('comments').doc(tempReplyId)
-        const videoRef = db.collection('videos').doc(focusedPost.id)
-        const profileRef = db.collection('profiles').doc(userId).collection('comments').doc(tempReplyId)
-        batch.update(videoCommentRef, {
-            replies: FieldValue.arrayUnion(newReply)
-        })
-        batch.update(videoRef, {
-            comments: FieldValue.increment(1)
-        })
-        batch.set(profileRef, {
-            replies: FieldValue.arrayUnion(newReply)
-        })
-        await batch.commit();
-        res.status(200).json({ done: true });
-    }
-    catch (error) {
-        console.error(error)
-        res.status(500).json({ error: 'Failed to add reply to comment.' });
-    }
-  }
-  }
-})
-})
+    formData.append('api_user', MODERATION_API_USER);
+    formData.append('api_secret', MODERATION_API_SECRET);
 
-app.post('/api/newReplyUsername', async (req, res) => {
-  const data = req.body;
-  const focusedPost = data.data.focusedPost
-  const tempReplyId = data.data.tempReplyId
-  const newReply = data.data.newReply
-  const userId = data.data.user
-  const textModerationURL = data.data.textModerationURL
-  const formData = new FormData();
+    try {
+        const response = await axios.post(textModerationURL, formData);
+        if (response.data?.link?.matches.length > 0) return { link: true };
+        if (response.data?.profanity?.matches.some(obj => obj.intensity === 'high')) return { profanity: true };
+        return { approved: true };
+    } catch (error) {
+        console.error("Moderation API error:", error.message);
+        return { error: "Text moderation failed." };
+    }
+}
+async function addReplyUsername(data, collectionType) {
+    const { focusedPost, tempReplyId, newReply, userId, textModerationURL } = data.data;
+    const formData = new FormData();
     formData.append('text', newReply.reply);
     formData.append('lang', 'en');
     formData.append('mode', 'standard');
-    formData.append('api_user', `${MODERATION_API_USER}`);
-    formData.append('api_secret', `${MODERATION_API_SECRET}`);
-  
-  Promise.all([axios({
-      url: `${textModerationURL}`,
-      method:'post',
-      data: formData,
-  })]).then(async(response) => {
-    if (response[0].data) {
-      if (response[0].data.link.matches.length > 0) {
-       res.send({link: true})
-    }
-    else if (response[0].data.profanity.matches.length > 0) {
-      const containsValue = response[0].data.profanity.matches.some(obj => obj.intensity === 'high');
-    if (containsValue) {
-        res.send({profanity: true})
-    }
-    }
-    else {
-      try {
+    formData.append('api_user', MODERATION_API_USER);
+    formData.append('api_secret', MODERATION_API_SECRET);
+    const moderationResult = await moderateText(newComment, textModerationURL);
+    if (moderationResult.link || moderationResult.profanity) return moderationResult;
+    if (moderationResult.error) return moderationResult;
+    try {
         const batch = db.batch();
-        const postCommentRef = db.collection('posts').doc(focusedPost.id).collection('comments').doc(tempReplyId)
-        const postRef = db.collection('posts').doc(focusedPost.id)
-        const profileRef = db.collection('profiles').doc(userId).collection('comments').doc(tempReplyId)
-        batch.update(postCommentRef, { 
-            replies: FieldValue.arrayUnion(newReply)
-        })
-        batch.update(postRef, {
-            comments: FieldValue.increment(1)
-        })
-        batch.set(profileRef, {
-            replies: FieldValue.arrayUnion(newReply)
-        })
+        const commentRef = db.collection(collectionType).doc(focusedPost.id).collection('comments').doc(tempReplyId);
+        const postRef = db.collection(collectionType).doc(focusedPost.id);
+        const profileRef = db.collection('profiles').doc(userId).collection('comments').doc(tempReplyId);
+
+        batch.update(commentRef, { replies: FieldValue.arrayUnion(newReply) });
+        batch.update(postRef, { comments: FieldValue.increment(1) });
+        batch.set(profileRef, { replies: FieldValue.arrayUnion(newReply) });
+
         await batch.commit();
-        res.status(200).json({ done: true });
+        return { done: true };
+    } catch (error) {
+        console.error(error);
+        return { error: 'Failed to add reply to comment.' };
     }
-    catch (error) {
-        console.error(error)
-        res.status(500).json({ error: 'Failed to add reply to comment.' });
-    }
-  }
-  } else {
-    res.status(500).json({ error: 'Failed to add reply to comment.' });
-  }
-})
-})
-app.post('/api/newReply', async (req, res) => {
-    const data = req.body;
-  const focusedPost = data.data.focusedPost
-  const tempReplyId = data.data.tempReplyId
-  const newReply = data.data.newReply
-  const commentSnap = data.data.commentSnap
-  const reply = data.data.reply
-  const userId = data.data.user
-  const username = data.data.username
-  const textModerationURL = data.data.textModerationURL
-  const formData = new FormData();
+}
+async function addReply(data, collectionType) {
+    const { focusedPost, tempReplyId, newReply, userId, reply, username, commentSnap, textModerationURL } = data.data;
+    const formData = new FormData();
     formData.append('text', newReply.reply);
     formData.append('lang', 'en');
     formData.append('mode', 'standard');
-    formData.append('api_user', `${MODERATION_API_USER}`);
-    formData.append('api_secret', `${MODERATION_API_SECRET}`);
-  
-    Promise.all([axios({
-      url: `${textModerationURL}`,
-      method:'post',
-      data: formData,
-  })]).then(async(response) => {
-    if (response[0].data) {
-      if (response[0].data.link.matches.length > 0) {
-       res.send({link: true})
-    }
-    else if (response[0].data.profanity.matches.length > 0) {
-      const containsValue = response[0].data.profanity.matches.some(obj => obj.intensity === 'high');
-    if (containsValue) {
-        res.send({profanity: true})
-    }
-    }
-    else {
-  try {
+    formData.append('api_user', MODERATION_API_USER);
+    formData.append('api_secret', MODERATION_API_SECRET);
+    const moderationResult = await moderateText(newComment, textModerationURL);
+    if (moderationResult.link || moderationResult.profanity) return moderationResult;
+    if (moderationResult.error) return moderationResult;
+    try {
         const batch = db.batch();
-        const postCommentRef = db.collection('posts').doc(focusedPost.id).collection('comments').doc(tempReplyId)
-        const postRef = db.collection('posts').doc(focusedPost.id)
+        const commentRef = db.collection(collectionType).doc(focusedPost.id).collection('comments').doc(tempReplyId)
+        const postRef = db.collection(collectionType).doc(focusedPost.id)
         const profileRef = db.collection('profiles').doc(commentSnap.user).collection('notifications').doc()
         const profileCheckRef = db.collection('profiles').doc(commentSnap.user).collection('checkNotifications').doc()
-        batch.update(postCommentRef, {
-            replies: FieldValue.arrayUnion(newReply)
-        })
-        batch.update(postRef, {
-            comments: FieldValue.increment(1)
-        })
+        batch.update(commentRef, { replies: FieldValue.arrayUnion(newReply) });
+        batch.update(postRef, { comments: FieldValue.increment(1) });
         batch.set(profileRef, {
             like: false,
             reply: true,
@@ -535,341 +151,155 @@ app.post('/api/newReply', async (req, res) => {
             userId: userId
         })
         await batch.commit();
-        res.status(200).json({ done: true });
+        return { done: true };
+    } catch (error) {
+        console.error(error);
+        return { error: 'Failed to add reply to comment.' };
     }
-    catch (error) {
-        console.error(error)
-        res.status(500).json({ error: 'Failed to add reply to comment.' });
-    }
-  }
-  }
-})
-})
-app.post('/api/newCommentVideo', async (req, res) => {
-    const data = req.body;
-  const newComment = data.data.newComment
-  console.log(newComment)
-  const pfp = data.data.pfp
-  const notificationToken = data.data.notificationToken
-  const username = data.data.username
-  const userId = data.data.user
-  const focusedPost = data.data.focusedPost
-  const blockedUsers = data.data.blockedUsers
-  const textModerationURL = data.data.textModerationURL
-  const formData = new FormData();
+}
+async function addComment(data, collectionType) {
+    const { focusedPost, newComment, blockedUsers, notificationToken, userId, username, textModerationURL } = data.data;
+    const formData = new FormData();
     formData.append('text', newComment);
     formData.append('lang', 'en');
     formData.append('mode', 'standard');
-    formData.append('api_user', `${MODERATION_API_USER}`);
-    formData.append('api_secret', `${MODERATION_API_SECRET}`);
-  
-    Promise.all([axios({
-      url: `${textModerationURL}`,
-      method:'post',
-      data: formData,
-  })]).then(async(response) => {
-    if (response[0].data) {
-      if (response[0].data.link.matches.length > 0) {
-       res.send({link: true})
+    formData.append('api_user', MODERATION_API_USER);
+    formData.append('api_secret', MODERATION_API_SECRET);
+    const moderationResult = await moderateText(newComment, textModerationURL);
+    if (moderationResult.link || moderationResult.profanity) return moderationResult;
+    if (moderationResult.error) return moderationResult;
+    try {
+
+        const batch = db.batch();
+        const postRef = db.collection(collectionType).doc(focusedPost.id)
+        const docRef = db.collection(collectionType).doc(focusedPost.id).collection('comments').doc()
+        const profileCommentRef = db.collection('profiles').doc(userId).collection('comments').doc(docRef.id)
+        const profileCheckRef = db.collection('profiles').doc(focusedPost.userId).collection('checkNotifications').doc()
+        const profileRef = db.collection('profiles').doc(focusedPost.userId).collection('notifications').doc(docRef.id)
+        batch.set(docRef, {
+            comment: newComment,
+            pfp: pfp,
+            blockedUsers: blockedUsers,
+            notificationToken: notificationToken,
+            username: username,
+            timestamp: FieldValue.serverTimestamp(),
+            likedBy: [],
+            replies: [],
+            user: userId,
+            postId: focusedPost.id
+        })
+        batch.update(postRef, {
+            comments: FieldValue.increment(1)
+        })
+        batch.set(profileRef, {
+            like: false,
+            comment: true,
+            friend: false,
+            item: newComment,
+            request: false,
+            acceptRequest: false,
+            theme: false,
+            postId: focusedPost.id,
+            report: false,
+            requestUser: userId,
+            requestNotificationToken: focusedPost.notificationToken,
+            likedBy: username,
+            timestamp: FieldValue.serverTimestamp()
+        })
+        batch.set(profileCommentRef, {
+            comment: newComment,
+            username: username, 
+            timestamp: FieldValue.serverTimestamp(),
+            user: userId,
+            postId: focusedPost.id
+        })
+        batch.set(profileCheckRef, {
+            userId: userId
+        })
+        await batch.commit();
+        return { done: true };
+    } catch (error) {
+        console.error(error);
+        return { error: 'Failed to add reply to comment.' };
     }
-    else if (response[0].data.profanity.matches.length > 0) {
-      const containsValue = response[0].data.profanity.matches.some(obj => obj.intensity === 'high');
-    if (containsValue) {
-        res.send({profanity: true})
-    }
-    }
-    else {
-  try {
-    const batch = db.batch();
-    const videoRef = db.collection('videos').doc(focusedPost.id)
-    const docRef = db.collection('videos').doc(focusedPost.id).collection('comments').doc()
-    const profileCommentRef = db.collection('profiles').doc(userId).collection('comments').doc(docRef.id)
-    const profileCheckRef = db.collection('profiles').doc(focusedPost.userId).collection('checkNotifications').doc()
-    const profileRef = db.collection('profiles').doc(focusedPost.userId).collection('notifications').doc(docRef.id)
-    batch.set(docRef, {
-        comment: newComment,
-        pfp: pfp,
-        blockedUsers: blockedUsers,
-        notificationToken: notificationToken,
-        username: username,
-        timestamp: FieldValue.serverTimestamp(),
-        likedBy: [],
-        replies: [],
-        user: userId,
-        postId: focusedPost.id
-    })
-    batch.update(videoRef, {
-        comments: FieldValue.increment(1)
-    })
-    batch.set(profileRef, {
-        like: false,
-        comment: true,
-        friend: false,
-        item: newComment,
-        request: false,
-        acceptRequest: false,
-        theme: false,
-        postId: focusedPost.id,
-        report: false,
-        requestUser: userId,
-        requestNotificationToken: focusedPost.notificationToken,
-        likedBy: username,
-        timestamp: FieldValue.serverTimestamp()
-    })
-    batch.set(profileCommentRef, {
-        comment: newComment,
-        username: username, 
-        timestamp: FieldValue.serverTimestamp(),
-        user: userId,
-        postId: focusedPost.id
-    })
-    batch.set(profileCheckRef, {
-        userId: userId
-    })
-    await batch.commit();
-    res.status(200).json({ done: true, docRef: docRef });
-    }
-    catch (error) {
-        console.error(error)
-        res.status(500).json({ error: 'Failed to add reply to comment.' });
-    }
-  }
-    }
-  })
-})
-app.post('/api/newCommentVideoUsername', async (req, res) => {
-    const data = req.body;
-  const newComment = data.data.newComment
-  const pfp = data.data.pfp
-  console.log(newComment)
-  const notificationToken = data.data.notificationToken
-  const username = data.data.username
-  const userId = data.data.user
-  const focusedPost = data.data.focusedPost
-  const blockedUsers = data.data.blockedUsers
-  const textModerationURL = data.data.textModerationURL
-  const formData = new FormData();
+}
+async function addCommentUsername(data, collectionType) {
+    const { focusedPost, newComment, blockedUsers, notificationToken, userId, username, textModerationURL } = data.data;
+    const formData = new FormData();
     formData.append('text', newComment);
     formData.append('lang', 'en');
     formData.append('mode', 'standard');
-    formData.append('api_user', `${MODERATION_API_USER}`);
-    formData.append('api_secret', `${MODERATION_API_SECRET}`);
-  
-    Promise.all([axios({
-      url: `${textModerationURL}`,
-      method:'post',
-      data: formData,
-  })]).then(async(response) => {
-    if (response[0].data) {
-      if (response[0].data.link.matches.length > 0) {
-       res.send({link: true})
+    formData.append('api_user', MODERATION_API_USER);
+    formData.append('api_secret', MODERATION_API_SECRET);
+    const moderationResult = await moderateText(newComment, textModerationURL);
+    if (moderationResult.link || moderationResult.profanity) return moderationResult;
+    if (moderationResult.error) return moderationResult;
+    try {
+
+        const batch = db.batch();
+        const docRef = db.collection(collectionType).doc(focusedPost.id).collection('comments')
+        const postRef = db.collection(collectionType).doc(focusedPost.id)
+        const profileCommentRef = db.collection('profiles').doc(userId).collection('comments').doc(docRef.id)
+        batch.set(docRef, {
+            comment: newComment,
+            pfp: pfp,
+            blockedUsers: blockedUsers,
+            notificationToken: notificationToken,
+            username: username,
+            timestamp: FieldValue.serverTimestamp(),
+            likedBy: [],
+            replies: [],
+            user: userId,
+            postId: focusedPost.id
+        })
+        batch.update(postRef, {
+            comments: FieldValue.increment(1)
+        })
+        batch.set(profileCommentRef, {
+            comment: newComment,
+            username: username, 
+            timestamp: FieldValue.serverTimestamp(),
+            user: userId,
+            postId: focusedPost.id
+        })
+        await batch.commit();
+        return { done: true };
+    } catch (error) {
+        console.error(error);
+        return { error: 'Failed to add reply to comment.' };
     }
-    else if (response[0].data.profanity.matches.length > 0) {
-      const containsValue = response[0].data.profanity.matches.some(obj => obj.intensity === 'high');
-    if (containsValue) {
-        res.send({profanity: true})
-    }
-    }
-    else {
-  try {
-    const batch = db.batch();
-    const docRef = db.collection('videos').doc(focusedPost.id).collection('comments')
-    const videoRef = db.collection('videos').doc(focusedPost.id)
-    const profileCommentRef = db.collection('profiles').doc(userId).collection('comments').doc(docRef.id)
-    batch.set(docRef, {
-        comment: newComment,
-        pfp: pfp,
-        blockedUsers: blockedUsers,
-        notificationToken: notificationToken,
-        username: username,
-        timestamp: FieldValue.serverTimestamp(),
-        likedBy: [],
-        replies: [],
-        user: userId,
-        postId: focusedPost.id
-    })
-    batch.update(videoRef, {
-        comments: FieldValue.increment(1)
-    })
-    batch.set(profileCommentRef, {
-        comment: newComment,
-        username: username, 
-        timestamp: FieldValue.serverTimestamp(),
-        user: userId,
-        postId: focusedPost.id
-    })
-    await batch.commit();
-    res.status(200).json({ done: true, docRef: docRef });
-    }
-    catch (error) {
-        console.error(error)
-        res.status(500).json({ error: 'Failed to add reply to comment.' });
-    }
-  }
-  }
+}
+app.post('/api/newReplyVideoUsername', async (req, res) => {
+    const result = await addReplyUsername(req.body, 'videos');
+    res.status(result.done ? 200 : 500).json(result);
+});
+app.post('/api/newReplyUsername', async (req, res) => {
+    const result = await addReplyUsername(req.body, 'posts');
+    res.status(result.done ? 200 : 500).json(result);
+});
+app.post('/api/newReply', async (req, res) => {
+    const result = await addReply(req.body, 'posts');
+    res.status(result.done ? 200 : 500).json(result);
 })
+app.post('/api/newReplyVideo', async(req, res) => {
+    const result = await addReply(req.body, 'videos');
+    res.status(result.done ? 200 : 500).json(result);
 })
-app.post('/api/newComment', async (req, res) => {
-    const data = req.body;
-  const newComment = data.data.newComment
-  const pfp = data.data.pfp
-  const notificationToken = data.data.notificationToken
-  const username = data.data.username
-  const userId = data.data.user
-  const focusedPost = data.data.focusedPost
-  const blockedUsers = data.data.blockedUsers
-  const textModerationURL = data.data.textModerationURL
-  const formData = new FormData();
-    formData.append('text', newComment);
-    formData.append('lang', 'en');
-    formData.append('mode', 'standard');
-    formData.append('api_user', `${MODERATION_API_USER}`);
-    formData.append('api_secret', `${MODERATION_API_SECRET}`);
-  
-    Promise.all([axios({
-      url: `${textModerationURL}`,
-      method:'post',
-      data: formData,
-  })]).then(async(response) => {
-    if (response[0].data) {
-      if (response[0].data.link.matches.length > 0) {
-       res.send({link: true})
-    }
-    else if (response[0].data.profanity.matches.length > 0) {
-      const containsValue = response[0].data.profanity.matches.some(obj => obj.intensity === 'high');
-    if (containsValue) {
-        res.send({profanity: true})
-    }
-    }
-    else {
-  try {
-    const batch = db.batch();
-    const docRef = db.collection('posts').doc(focusedPost.id).collection('comments').doc()
-    const postRef = db.collection('posts').doc(focusedPost.id)
-    const profileCommentRef = db.collection('profiles').doc(userId).collection('comments').doc(docRef.id)
-    const profileCheckRef = db.collection('profiles').doc(focusedPost.userId).collection('checkNotifications').doc()
-    const profileRef = db.collection('profiles').doc(focusedPost.userId).collection('notifications').doc(docRef.id)
-    batch.set(docRef, {
-        comment: newComment,
-        pfp: pfp,
-        blockedUsers: blockedUsers,
-        notificationToken: notificationToken,
-        username: username,
-        timestamp: FieldValue.serverTimestamp(),
-        likedBy: [],
-        replies: [],
-        user: userId,
-        postId: focusedPost.id
-    })
-    batch.update(postRef, {
-        comments: FieldValue.increment(1)
-    })
-    batch.set(profileRef, {
-        like: false,
-        comment: true,
-        friend: false,
-        item: newComment,
-        request: false,
-        acceptRequest: false,
-        theme: false,
-        postId: focusedPost.id,
-        report: false,
-        requestUser: userId,
-        requestNotificationToken: focusedPost.notificationToken,
-        likedBy: username,
-        timestamp: FieldValue.serverTimestamp()
-    })
-    batch.set(profileCommentRef, {
-        comment: newComment,
-        username: username, 
-        timestamp: FieldValue.serverTimestamp(),
-        user: userId,
-        postId: focusedPost.id
-    })
-    batch.set(profileCheckRef, {
-        userId: userId
-    })
-    await batch.commit();
-    res.status(200).json({ done: true, docRef: docRef });
-  }
-  catch (error) {
-        console.error(error)
-        res.status(500).json({ error: 'Failed to add reply to comment.' });
-    }
-  }
-  }
+app.post('/api/newCommentVideo', async(req, res) => {
+    const result = await addComment(req.body, 'videos');
+    res.status(result.done ? 200 : 500).json(result);
 })
+app.post('/api/newComment', async(req, res) => {
+    const result = await addComment(req.body, 'posts');
+    res.status(result.done ? 200 : 500).json(result);
 })
-app.post('/api/newCommentUsername', async (req, res) => {
-    const data = req.body;
-  const newComment = data.data.newComment
-  const pfp = data.data.pfp
-  const notificationToken = data.data.notificationToken
-  const username = data.data.username
-  const userId = data.data.user
-  const focusedPost = data.data.focusedPost
-  const blockedUsers = data.data.blockedUsers
-  const textModerationURL = data.data.textModerationURL
-  const formData = new FormData();
-    formData.append('text', newComment);
-    formData.append('lang', 'en');
-    formData.append('mode', 'standard');
-    formData.append('api_user', `${MODERATION_API_USER}`);
-    formData.append('api_secret', `${MODERATION_API_SECRET}`);
-  
-    Promise.all([axios({
-      url: `${textModerationURL}`,
-      method:'post',
-      data: formData,
-  })]).then(async(response) => {
-    if (response[0].data) {
-      if (response[0].data.link.matches.length > 0) {
-       res.send({link: true})
-    }
-    else if (response[0].data.profanity.matches.length > 0) {
-      const containsValue = response[0].data.profanity.matches.some(obj => obj.intensity === 'high');
-    if (containsValue) {
-        res.send({profanity: true})
-    }
-    }
-    else {
-  try {
-    const batch = db.batch();
-    const docRef = db.collection('posts').doc(focusedPost.id).collection('comments').doc()
-    const postRef = db.collection('posts').doc(focusedPost.id)
-    const profileCommentRef = db.collection('profiles').doc(userId).collection('comments').doc(docRef.id)
-    batch.set(docRef, {
-        comment: newComment,
-        pfp: pfp,
-        blockedUsers: blockedUsers,
-        notificationToken: notificationToken,
-        username: username,
-        timestamp: FieldValue.serverTimestamp(),
-        likedBy: [],
-        replies: [],
-        user: userId,
-        postId: focusedPost.id
-    })
-    batch.update(postRef, {
-        comments: FieldValue.increment(1)
-    })
-    batch.set(profileCommentRef, {
-        comment: newComment,
-        username: username, 
-        timestamp: FieldValue.serverTimestamp(),
-        user: userId,
-        postId: focusedPost.id
-    })
-    await batch.commit();
-    res.status(200).json({ done: true, docRef: docRef.id });
-  }
-  catch (error) {
-        console.error(error)
-        res.status(500).json({ error: 'Failed to add reply to comment.' });
-    }
-  }
-  }
+app.post('/api/newCommentVideoUsername', async(req, res) => {
+    const result = await addCommentUsername(req.body, 'videos');
+    res.status(result.done ? 200 : 500).json(result);
 })
+app.post('/api/newCommentUsername', async(req, res) => {
+    const result = await addCommentUsername(req.body, 'posts');
+    res.status(result.done ? 200 : 500).json(result);
 })
 app.post('/api/deleteImageMessage', async (req, res) => {
     const data = req.body
@@ -1089,6 +519,62 @@ app.post('/api/uploadStory', async(req, res) => {
       })
       res.send({done: true})
   })
+  app.post('/api/getFreeTheme', async(req, res) => {
+  const data = req.body
+  const userId = data.data.user
+  const keywords = data.data.keywords
+  const searchKeywords = data.data.searchKeywords
+  const name = data.data.name
+  const theme = data.data.theme
+  const productId = data.data.productId
+  const themeId = data.data.themeId
+  const notificationToken = data.data.notificationToken
+  try {
+    const batch = db.batch();
+    const purchasedRef = db.collection('profiles').doc(userId).collection('purchased').doc()
+    const freeRef = db.collection('freeThemes').doc(productId)
+    const profileRef = db.collection('profiles').doc(userId)
+    const notificationsRef = db.collection('profiles').doc(userId).collection('notifications').doc()
+    batch.set(purchasedRef, {
+      active: true,
+      keywords: keywords,
+      searchKeywords: searchKeywords,
+      name: name,
+      images: FieldValue.arrayUnion(theme),
+      price: 0,
+      timestamp: FieldValue.serverTimestamp(),
+      bought: true,
+      productId: productId,
+      selling: true
+    })
+    batch.update(freeRef, {
+      bought_count: FieldValue.increment(1)
+    })
+    batch.update(profileRef, {
+      themeIds: FieldValue.arrayUnion(productId)
+    })
+    batch.set(notificationsRef, {
+      like: false,
+      comment: false,
+      friend: false,
+      item: themeId,
+      request: false,
+      acceptRequest: false,
+      postId: themeId,
+      theme: true,
+      report: false,
+      requestUser: userId,
+      requestNotificationToken: notificationToken,
+      likedBy: [],
+      timestamp: FieldValue.serverTimestamp()
+    })
+    await batch.commit();
+    res.status(200).json({ done: true });
+  } catch (error) {
+    console.error(error)
+    res.status(500).json({ error: 'Failed to add reply to comment.' });
+  }
+})
   app.post('/api/profilepostnotsell', async (req, res) => {
       const data = req.body
       const userId = data.data.user
@@ -1720,82 +1206,7 @@ app.post('/api/newReplyToReply', async(req, res) => {
   }
 })
 })
-app.post('/api/newReplyVideo', async(req, res) => {
-  const data = req.body
-  const focusedPost = data.data.focusedPost
-  const tempReplyId = data.data.tempReplyId
-  const newReply = data.data.newReply
-  const commentSnap = data.data.commentSnap
-  const reply = data.data.reply
-  const userId = data.data.user
-  const username = data.data.username
-  const textModerationURL = data.data.textModerationURL
-  const formData = new FormData();
-    formData.append('text', newReply.reply);
-    formData.append('lang', 'en');
-    formData.append('mode', 'standard');
-    formData.append('api_user', `${MODERATION_API_USER}`);
-    formData.append('api_secret', `${MODERATION_API_SECRET}`);
-  
-    Promise.all([axios({
-      url: `${textModerationURL}`,
-      method:'post',
-      data: formData,
-  })]).then(async(response) => {
-    if (response[0].data) {
-      if (response[0].data.link.matches.length > 0) {
-       res.send({link: true})
-    }
-    else if (response[0].data.profanity.matches.length > 0) {
-      const containsValue = response[0].data.profanity.matches.some(obj => obj.intensity === 'high');
-    if (containsValue) {
-        res.send({profanity: true})
-    }
-    }
-    else {
-      try {   
-              const batch = db.batch();
-              const videoCommentRef = db.collection('videos').doc(focusedPost.id).collection('comments').doc(tempReplyId)
-              const videoRef = db.collection('videos').doc(focusedPost.id)
-              const profileRef = db.collection('profiles').doc(commentSnap.user).collection('notifications').doc()
-              const profileCheckRef = db.collection('profiles').doc(commentSnap.user).collection('checkNotifications').doc()
-              batch.update(videoCommentRef, {
-                  replies: FieldValue.arrayUnion(newReply)
-              })
-              batch.update(videoRef, {
-                  comments: FieldValue.increment(1)
-              })
-              batch.set(profileRef, {
-                  like: false,
-                  reply: true,
-                  friend: false,
-                  item: reply,
-                  request: false,
-                  acceptRequest: false,
-                  theme: false,
-                  report: false,
-                  requestUser: userId,
-                  postId: focusedPost.id,
-                  requestNotificationToken: focusedPost.notificationToken,
-                  likedBy: username,
-                  timestamp: FieldValue.serverTimestamp()
-              })
-              batch.set(profileCheckRef, {
-                  userId: userId
-              })
-              await batch.commit();
-              res.status(200).json({ done: true });
-          }
-          catch (error) {
-              console.error(error)
-              res.status(500).json({ error: 'Failed to add reply to comment.' });
-          }
-  }
-} else {
-  res.send({error: true})
-}
-  })
-})
+
 app.post('/api/addFriend', async(req,res) => {
               const data = req.body
               const newFriend = data.data.newFriend
@@ -2892,8 +2303,8 @@ app.post('/api/username', async(req, res) => {
     data.append('text', receivedData.username);
     data.append('lang', 'en');
     data.append('mode', 'username');
-    data.append('api_user', process.env.MODERATION_API_USER);
-    data.append('api_secret', process.env.MODERATION_API_SECRET);
+    data.append('api_user', MODERATION_API_USER);
+    data.append('api_secret', MODERATION_API_SECRET);
     console.log(data)
     axios({
     url: 'https://api.sightengine.com/1.0/text/check.json',
@@ -2919,8 +2330,8 @@ app.post('/api/text', (req, res) => {
     data.append('text', receivedData.text);
     data.append('lang', 'en');
     data.append('mode', 'standard');
-    data.append('api_user', process.env.MODERATION_API_USER);
-    data.append('api_secret', process.env.MODERATION_API_SECRET);
+    data.append('api_user', MODERATION_API_USER);
+    data.append('api_secret', MODERATION_API_SECRET);
 
     axios({
     url: 'https://api.sightengine.com/1.0/text/check.json',
@@ -3136,66 +2547,4 @@ app.post('/api/friendNotification', (req, res) => {
 app.listen(4000, () => {
   console.log('Server is running on port 4000');
 });
-/* const express = require('express');
 
-const bodyParser = require('body-parser');
-const app = express();
-app.use(cors());
-app.use(bodyParser.json());
-
-// Define a sample API endpoint
-app.get('/api/data', (req, res) => {
-  const receivedData = req.body;
-  // Handle the received data
-  console.log(receivedData);
-  res.json({ message: 'Data received successfully' });
-});
-
-// Start the server
-const port = 3000;
-app.listen(port, () => {
-  console.log(`Server is running on port ${port}`);
-});
-
-const express = require('express');
-const bodyParser = require('body-parser');
-const axios = require('axios')
-const FormData = require('form-data');
-const fs = require('fs');
-const app = express();
-
-// Parse JSON request bodies
-app.use(bodyParser.json());
-
-// Define an endpoint to handle the incoming data
-app.post('/api/endpoint', (req, res) => {
-  const receivedData = req.body;
-  // Handle the received data
-  //console.log(receivedData);
-  data = new FormData();
-    data.append('media', fs.createReadStream(receivedData.uri));
-    data.append('models', 'nudity-2.0,wad,offensive,scam,gore,qr-content');
-    data.append('api_user', process.env.MODERATION_API_USER);
-    data.append('api_secret', process.env.MODERATION_API_SECRET);
-    axios({
-        method: 'post',
-        url:'https://api.sightengine.com/1.0/check.json',
-        data: data,
-        headers: data.getHeaders()
-        })
-        .then(function (response) {
-        // on success: handle response
-        console.log(response.data);
-        })
-        .catch(function (error) {
-        // handle error
-        if (error.response) console.log(error.response.data);
-        else console.log(error.message);
-        });
-    res.json({ message: 'Data received successfully' });
-});
-
-
-// Start the server
-
- */
