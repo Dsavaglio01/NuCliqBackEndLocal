@@ -1,0 +1,12 @@
+.env*
+node_modules/
+.expo/
+serviceAccountKey.json
+# debug
+npm-debug.*
+yarn-debug.*
+yarn-error.*
+
+# macOS
+.DS_Store
+*.pem

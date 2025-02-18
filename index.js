@@ -1,0 +1,3201 @@
+const express = require('express')
+const bodyParser = require('body-parser')
+const axios = require('axios');
+const FormData = require('form-data');
+const app = express();
+require('dotenv').config()
+const stripe = require('stripe')(process.env.STRIPE_TEST_KEY);
+const {Expo} = require('expo-server-sdk')
+let expo = new Expo({ accessToken: process.env.EXPO_TOKEN });
+const cors = require('cors');
+var langdetect = require('langdetect');
+var sightengine = require('sightengine')(process.env.MODERATION_API_USER, process.env.MODERATION_API_SECRET);
+const { initializeApp, cert } = require('firebase-admin/app');
+const admin = require('firebase-admin')
+const {FieldValue, getFirestore} = require('firebase-admin/firestore')
+const serviceAccount = require(process.env.SERVICE_ACCOUNT_PATH)
+const firebaseApp = initializeApp({
+  credential: cert(serviceAccount),
+  databaseURL: process.env.DATABASE_URL,
+  storageBucket: process.env.STORAGE_BUCKET
+});
+const db = getFirestore('qadb')
+const db2 = getFirestore()
+const citiesRef = db2.collection('freeThemes');
+function createSearchKeywordsForMultipleWords(field, maxLen, n, limit) {
+  const words = field.split(' ').map(word => word.trim()); // Split the field by spaces and trim spaces
+  const result = new Set(); // Store unique keywords
+  let count = 0; // Counter for added keywords
+
+  // Loop through each word
+  for (const word of words) {
+    // Generate prefixes (from length 1 to maxLen)
+    for (let i = 1; i <= maxLen && i <= word.length && count < limit; i++) {
+      const prefix = word.substring(0, i);
+      result.add(prefix);
+      count++;
+      if (count >= limit) break;
+    }
+
+    // Generate suffixes (from length 1 to maxLen)
+    for (let i = 1; i <= maxLen && i <= word.length && count < limit; i++) {
+      const suffix = word.substring(word.length - i);
+      result.add(suffix);
+      count++;
+      if (count >= limit) break;
+    }
+
+    // Generate n-grams (of length n)
+    for (let i = 0; i <= word.length - n && count < limit; i++) {
+      const ngram = word.substring(i, i + n);
+      result.add(ngram);
+      count++;
+      if (count >= limit) break;
+    }
+
+    if (count >= limit) break;
+  }
+
+  return Array.from(result).slice(0, limit); // Return as an array
+}
+
+// Example usage:
+
+
+function createSearchKeywordsWithHybridTokenization(field, limit) {
+  // Regular expression to match emojis
+  const emojiRegex = /([\u{1F600}-\u{1F64F}]|[\u{1F300}-\u{1F5FF}]|[\u{1F680}-\u{1F6FF}]|[\u{1F700}-\u{1F77F}]|[\u{1F780}-\u{1F7FF}]|[\u{1F800}-\u{1F8FF}]|[\u{1F900}-\u{1F9FF}]|[\u{1FA00}-\u{1FA6F}]|[\u{2600}-\u{26FF}]|[\u{2700}-\u{27BF}]|[\u{1F1E6}-\u{1F1FF}]|[\u{200D}]|[\u{1F004}]|[\u{1F0CF}]|[\u{1F9C0}]|[\u{1F9D0}-\u{1F9FF}]|[\u{1F004}]|[\u{1F0CF}]|[\u{1F004}]|[\u{1F004}])/gu;
+
+  // Remove emojis from the input field
+  const sanitizedField = field.replace(emojiRegex, '');
+
+  const words = sanitizedField.split(',').map(word => word.trim());
+  const shortTokens = new Set();
+  const longTokens = new Set();
+  let shortCount = 0;
+  let longCount = 0;
+
+  // 1. Add whole words to longTokens
+  for (const word of words) {
+    if (longCount < limit) {
+      longTokens.add(word);
+      longCount++;
+    }
+  }
+
+  // 2. Generate n-grams and include edge n-grams in shortTokens
+  const minNgramLength = 3;
+  const maxEdgeNgramLength = 3; // Adjust as needed
+  for (const word of words) {
+    for (let n = word.length; n >= 1 && (shortCount < limit || longCount < limit); n--) {
+      // Edge n-grams (prefixes) up to maxEdgeNgramLength
+      if (n <= maxEdgeNgramLength && shortCount < limit) {
+        const edgeNgram = word.substring(0, n);
+        shortTokens.add(edgeNgram);
+        shortCount++;
+      }
+
+      // Regular n-grams
+      for (let i = 0; i <= word.length - n && (shortCount < limit || longCount < limit); i++) {
+        const ngram = word.substring(i, i + n);
+        if (n <= 3 && shortCount < limit) {
+          shortTokens.add(ngram);
+          shortCount++;
+        } else if (n >= 4 && longCount < limit) {
+          longTokens.add(ngram);
+          longCount++;
+        }
+      }
+    }
+
+    if (shortCount >= limit && longCount >= limit) break;
+  }
+
+  return [Array.from(shortTokens), Array.from(longTokens)];
+}
+const bucket = admin.storage().bucket();
+
+const bruh = async() => {
+  (await citiesRef.get()).forEach(async(e) => {
+    //const docSnap = await db.collection('posts').doc(e.id).get()
+    db.collection('freeThemes').doc(e.id).set({...e.data()})
+  })
+  /* const [files] = await bucket.getFiles();
+  const promises = files.map((file) => file.getMetadata());
+  const metadata = await Promise.all(promises)
+  const filteredMetadata = metadata.filter(meta => 
+      !meta[0].name.startsWith('posts')
+    );
+  filteredMetadata.sort((a, b) => b[0].size - a[0].size); 
+
+    // Now you have the metadata array sorted by file size
+    
+    filteredMetadata.slice(0, 10).forEach(meta => {
+      console.log(`${meta[0].name}: ${meta[0].size} bytes`);
+    }); */
+    
+    /* await db.collection('posts').doc(doc.id).update({
+      comments: docSnap.data().count
+    }) */
+    /* docSnap.forEach(async(e) => {
+      const collectionSnap = await db.collection('profiles').doc(doc.id).collection('purchasedThemes').doc(e.id).get()
+      const text = collectionSnap.data().keywords
+      if (typeof text == 'string') {
+      const keywords = createSearchKeywordsForMultipleWords(text.toLowerCase(), 5, 3, 30);
+    await db.collection('profiles').doc(doc.id).collection('purchasedThemes').doc(e.id).update({
+      searchKeywords: keywords
+    })
+    }
+    }) */
+    //
+    
+    
+    /* if ((await docSnap).data().notificationToken != null) {
+      const notificationToken = (await docSnap).data().notificationToken
+      const snapshot = db.collection('profiles').doc(doc.id).collection('posts').get()
+    if (!snapshot.empty) {
+      (await snapshot).forEach(async(e) => {
+        await db.collection('profiles').doc(doc.id).collection('posts').doc(e.id).update({
+          notificationToken: notificationToken
+        }).then(async() => await db.collection('posts').doc(e.id).update({
+          notificationToken: notificationToken
+        }))
+      })
+    }
+    
+    } */
+    //if (docSna)
+    
+      
+    /* (await docSnap).forEach(async(e) => {
+      console.log(e)
+      
+    
+    }) */
+    
+
+}
+//bruh()
+let accessToken = null;
+let tokenExpirationTime = null;
+const getAccessToken = async () => {
+  // If we have a valid cached token, return it
+  if (accessToken && tokenExpirationTime > Date.now()) {
+    return accessToken;
+  }
+
+  const authString = `${process.env.CLIENT_ID}:${process.env.client_secret}`;
+  const authBase64 = Buffer.from(authString).toString('base64');
+
+  try {
+    const response = await fetch('https://accounts.spotify.com/api/token', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Basic ${authBase64}`,
+        'Content-Type': 'application/x-www-form-urlencoded',
+      },
+      body: 'grant_type=client_credentials',
+    });
+
+    const data = await response.json();
+    if (data.error) {
+      throw new Error(data.error_description);
+    }
+
+    accessToken = data.access_token;
+    tokenExpirationTime = Date.now() + (data.expires_in * 1000); // Convert seconds to milliseconds
+
+    return accessToken;
+  } catch (error) {
+    console.error('Error getting access token:', error);
+    throw error; // Rethrow the error for proper handling
+  }
+};
+
+//const functions  = getFunctions(getApp())
+// Set the default below to your test phone number or pull it from an environment variable. 
+// In your production code, update the phone number dynamically for each transaction.
+
+//bruh()
+
+
+
+//console.log(db)
+/* for (let i = 1; i <= 20; i++) {
+  let username = faker.internet.userName()
+  let pfp = faker.image.avatar()
+  let firstName = faker.person.firstName()
+  let lastName = faker.person.lastName()
+  db.collection('posts').add({
+    caption: faker.lorem.sentence(),
+    likedBy: [],
+    comments: faker.number.int(100),
+    shares: faker.number.int(100),
+    usersSeen: [],
+    savedBy: [],
+    multiPost: false,
+    username: username,
+    post: faker.image.url(),
+    timestamp: Timestamp.now()
+  })
+  db.collection('usernames').add({
+    pfp: pfp,
+    username: username,
+    firstName: firstName,
+    lastName: lastName
+  })
+  db.collection('profiles').add({
+    bio: faker.person.bio(),
+    background: faker.image.url(),
+    catgories: [faker.lorem.word(), faker.lorem.word(), faker.lorem.word()],
+    education: faker.lorem.words(),
+    interests: [faker.lorem.word(), faker.lorem.word(), faker.lorem.word()],
+    occupation: faker.person.jobTitle(),
+    pfp: faker.image.avatar(),
+    userName: username,
+    firstName: firstName,
+    lastName: lastName,
+    timestamp: Timestamp.now()
+  })
+  db.collection('products').add({
+    name: faker.lorem.word(),
+    default_price_data: {
+        unit_amount: faker.commerce.price(),
+        currency: 'usd',
+        
+    },
+    keywords: faker.lorem.sentence(),
+    images: faker.image.url(),
+    expand: ['default_price'],
+    metadata: {
+      user: faker.database.mongodbObjectId(),
+      userId: '',
+      price: faker.commerce.price()
+    },
+  })
+  db.collection('groups').add({
+    cliqueId: faker.database.mongodbObjectId(),
+        banner: faker.image.url(),
+                    name: faker.lorem.word(),
+                    groupSecurity: 'public',
+                    category: categories[(Math.floor(Math.random() * categories.length))],
+                    description: faker.lorem.sentence(),
+                    pfp: faker.image.avatar(),
+                    members: [],
+                    admins: [],
+                    timestamp: Timestamp.now()
+  })
+} */
+
+//console.log(postFaker.caption())
+/* 
+db.collection('groups').add({
+
+})
+db.collection('products').add({
+
+}) */
+
+app.use(bodyParser.json());
+app.use(cors({
+    origin: 'http://localhost:3000', // Allow requests from this origin
+    methods: ['GET', 'POST', 'PUT', 'DELETE'], // Allow these methods
+    allowedHeaders: ['Content-Type', 'Authorization'] // Allow these headers
+}));
+app.post('/api/getFreeTheme', async(req, res) => {
+  const data = req.body
+  const userId = data.data.user
+  const keywords = data.data.keywords
+  const searchKeywords = data.data.searchKeywords
+  const name = data.data.name
+  const theme = data.data.theme
+  const productId = data.data.productId
+  const themeId = data.data.themeId
+  const notificationToken = data.data.notificationToken
+  try {
+    const batch = db.batch();
+    const purchasedRef = db.collection('profiles').doc(userId).collection('purchased').doc()
+    const freeRef = db.collection('freeThemes').doc(productId)
+    const profileRef = db.collection('profiles').doc(userId)
+    const notificationsRef = db.collection('profiles').doc(userId).collection('notifications').doc()
+    batch.set(purchasedRef, {
+      active: true,
+      keywords: keywords,
+      searchKeywords: searchKeywords,
+      name: name,
+      images: FieldValue.arrayUnion(theme),
+      price: 0,
+      timestamp: FieldValue.serverTimestamp(),
+      bought: true,
+      productId: productId,
+      selling: true
+    })
+    batch.update(freeRef, {
+      bought_count: FieldValue.increment(1)
+    })
+    batch.update(profileRef, {
+      themeIds: FieldValue.arrayUnion(productId)
+    })
+    batch.set(notificationsRef, {
+      like: false,
+      comment: false,
+      friend: false,
+      item: themeId,
+      request: false,
+      acceptRequest: false,
+      postId: themeId,
+      theme: true,
+      report: false,
+      requestUser: userId,
+      requestNotificationToken: notificationToken,
+      likedBy: [],
+      timestamp: FieldValue.serverTimestamp()
+    })
+    await batch.commit();
+    res.status(200).json({ done: true });
+  } catch (error) {
+    console.error(error)
+    res.status(500).json({ error: 'Failed to add reply to comment.' });
+  }
+})
+app.post('/api/newReplyVideoUsername', async (req, res) => {
+    const data = req.body;
+    const focusedPost = data.data.focusedPost
+    const tempReplyId = data.data.tempReplyId
+    const newReply = data.data.newReply
+    const userId = data.data.user
+    const textModerationURL = data.data.textModerationURL
+  const formData = new FormData();
+    formData.append('text', newReply.reply);
+    formData.append('lang', 'en');
+    formData.append('mode', 'standard');
+    formData.append('api_user', `${MODERATION_API_USER}`);
+    formData.append('api_secret', `${MODERATION_API_SECRET}`);
+  
+    Promise.all([axios({
+      url: `${textModerationURL}`,
+      method:'post',
+      data: formData,
+  })]).then(async(response) => {
+    if (response[0].data) {
+      if (response[0].data.link.matches.length > 0) {
+       res.send({link: true})
+    }
+    else if (response[0].data.profanity.matches.length > 0) {
+      const containsValue = response[0].data.profanity.matches.some(obj => obj.intensity === 'high');
+    if (containsValue) {
+        res.send({profanity: true})
+    }
+    }
+    else {
+    try {   
+        const batch = db.batch();
+        const videoCommentRef = db.collection('videos').doc(focusedPost.id).collection('comments').doc(tempReplyId)
+        const videoRef = db.collection('videos').doc(focusedPost.id)
+        const profileRef = db.collection('profiles').doc(userId).collection('comments').doc(tempReplyId)
+        batch.update(videoCommentRef, {
+            replies: FieldValue.arrayUnion(newReply)
+        })
+        batch.update(videoRef, {
+            comments: FieldValue.increment(1)
+        })
+        batch.set(profileRef, {
+            replies: FieldValue.arrayUnion(newReply)
+        })
+        await batch.commit();
+        res.status(200).json({ done: true });
+    }
+    catch (error) {
+        console.error(error)
+        res.status(500).json({ error: 'Failed to add reply to comment.' });
+    }
+  }
+  }
+})
+})
+
+app.post('/api/newReplyUsername', async (req, res) => {
+  const data = req.body;
+  const focusedPost = data.data.focusedPost
+  const tempReplyId = data.data.tempReplyId
+  const newReply = data.data.newReply
+  const userId = data.data.user
+  const textModerationURL = data.data.textModerationURL
+  const formData = new FormData();
+    formData.append('text', newReply.reply);
+    formData.append('lang', 'en');
+    formData.append('mode', 'standard');
+    formData.append('api_user', `${MODERATION_API_USER}`);
+    formData.append('api_secret', `${MODERATION_API_SECRET}`);
+  
+  Promise.all([axios({
+      url: `${textModerationURL}`,
+      method:'post',
+      data: formData,
+  })]).then(async(response) => {
+    if (response[0].data) {
+      if (response[0].data.link.matches.length > 0) {
+       res.send({link: true})
+    }
+    else if (response[0].data.profanity.matches.length > 0) {
+      const containsValue = response[0].data.profanity.matches.some(obj => obj.intensity === 'high');
+    if (containsValue) {
+        res.send({profanity: true})
+    }
+    }
+    else {
+      try {
+        const batch = db.batch();
+        const postCommentRef = db.collection('posts').doc(focusedPost.id).collection('comments').doc(tempReplyId)
+        const postRef = db.collection('posts').doc(focusedPost.id)
+        const profileRef = db.collection('profiles').doc(userId).collection('comments').doc(tempReplyId)
+        batch.update(postCommentRef, { 
+            replies: FieldValue.arrayUnion(newReply)
+        })
+        batch.update(postRef, {
+            comments: FieldValue.increment(1)
+        })
+        batch.set(profileRef, {
+            replies: FieldValue.arrayUnion(newReply)
+        })
+        await batch.commit();
+        res.status(200).json({ done: true });
+    }
+    catch (error) {
+        console.error(error)
+        res.status(500).json({ error: 'Failed to add reply to comment.' });
+    }
+  }
+  } else {
+    res.status(500).json({ error: 'Failed to add reply to comment.' });
+  }
+})
+})
+app.post('/api/newReply', async (req, res) => {
+    const data = req.body;
+  const focusedPost = data.data.focusedPost
+  const tempReplyId = data.data.tempReplyId
+  const newReply = data.data.newReply
+  const commentSnap = data.data.commentSnap
+  const reply = data.data.reply
+  const userId = data.data.user
+  const username = data.data.username
+  const textModerationURL = data.data.textModerationURL
+  const formData = new FormData();
+    formData.append('text', newReply.reply);
+    formData.append('lang', 'en');
+    formData.append('mode', 'standard');
+    formData.append('api_user', `${MODERATION_API_USER}`);
+    formData.append('api_secret', `${MODERATION_API_SECRET}`);
+  
+    Promise.all([axios({
+      url: `${textModerationURL}`,
+      method:'post',
+      data: formData,
+  })]).then(async(response) => {
+    if (response[0].data) {
+      if (response[0].data.link.matches.length > 0) {
+       res.send({link: true})
+    }
+    else if (response[0].data.profanity.matches.length > 0) {
+      const containsValue = response[0].data.profanity.matches.some(obj => obj.intensity === 'high');
+    if (containsValue) {
+        res.send({profanity: true})
+    }
+    }
+    else {
+  try {
+        const batch = db.batch();
+        const postCommentRef = db.collection('posts').doc(focusedPost.id).collection('comments').doc(tempReplyId)
+        const postRef = db.collection('posts').doc(focusedPost.id)
+        const profileRef = db.collection('profiles').doc(commentSnap.user).collection('notifications').doc()
+        const profileCheckRef = db.collection('profiles').doc(commentSnap.user).collection('checkNotifications').doc()
+        batch.update(postCommentRef, {
+            replies: FieldValue.arrayUnion(newReply)
+        })
+        batch.update(postRef, {
+            comments: FieldValue.increment(1)
+        })
+        batch.set(profileRef, {
+            like: false,
+            reply: true,
+            friend: false,
+            item: reply,
+            request: false,
+            acceptRequest: false,
+            theme: false,
+            report: false,
+            requestUser: userId,
+            postId: focusedPost.id,
+            requestNotificationToken: focusedPost.notificationToken,
+            likedBy: username,
+            timestamp: FieldValue.serverTimestamp()
+        })
+        batch.set(profileCheckRef, {
+            userId: userId
+        })
+        await batch.commit();
+        res.status(200).json({ done: true });
+    }
+    catch (error) {
+        console.error(error)
+        res.status(500).json({ error: 'Failed to add reply to comment.' });
+    }
+  }
+  }
+})
+})
+app.post('/api/newCommentVideo', async (req, res) => {
+    const data = req.body;
+  const newComment = data.data.newComment
+  console.log(newComment)
+  const pfp = data.data.pfp
+  const notificationToken = data.data.notificationToken
+  const username = data.data.username
+  const userId = data.data.user
+  const focusedPost = data.data.focusedPost
+  const blockedUsers = data.data.blockedUsers
+  const textModerationURL = data.data.textModerationURL
+  const formData = new FormData();
+    formData.append('text', newComment);
+    formData.append('lang', 'en');
+    formData.append('mode', 'standard');
+    formData.append('api_user', `${MODERATION_API_USER}`);
+    formData.append('api_secret', `${MODERATION_API_SECRET}`);
+  
+    Promise.all([axios({
+      url: `${textModerationURL}`,
+      method:'post',
+      data: formData,
+  })]).then(async(response) => {
+    if (response[0].data) {
+      if (response[0].data.link.matches.length > 0) {
+       res.send({link: true})
+    }
+    else if (response[0].data.profanity.matches.length > 0) {
+      const containsValue = response[0].data.profanity.matches.some(obj => obj.intensity === 'high');
+    if (containsValue) {
+        res.send({profanity: true})
+    }
+    }
+    else {
+  try {
+    const batch = db.batch();
+    const videoRef = db.collection('videos').doc(focusedPost.id)
+    const docRef = db.collection('videos').doc(focusedPost.id).collection('comments').doc()
+    const profileCommentRef = db.collection('profiles').doc(userId).collection('comments').doc(docRef.id)
+    const profileCheckRef = db.collection('profiles').doc(focusedPost.userId).collection('checkNotifications').doc()
+    const profileRef = db.collection('profiles').doc(focusedPost.userId).collection('notifications').doc(docRef.id)
+    batch.set(docRef, {
+        comment: newComment,
+        pfp: pfp,
+        blockedUsers: blockedUsers,
+        notificationToken: notificationToken,
+        username: username,
+        timestamp: FieldValue.serverTimestamp(),
+        likedBy: [],
+        replies: [],
+        user: userId,
+        postId: focusedPost.id
+    })
+    batch.update(videoRef, {
+        comments: FieldValue.increment(1)
+    })
+    batch.set(profileRef, {
+        like: false,
+        comment: true,
+        friend: false,
+        item: newComment,
+        request: false,
+        acceptRequest: false,
+        theme: false,
+        postId: focusedPost.id,
+        report: false,
+        requestUser: userId,
+        requestNotificationToken: focusedPost.notificationToken,
+        likedBy: username,
+        timestamp: FieldValue.serverTimestamp()
+    })
+    batch.set(profileCommentRef, {
+        comment: newComment,
+        username: username, 
+        timestamp: FieldValue.serverTimestamp(),
+        user: userId,
+        postId: focusedPost.id
+    })
+    batch.set(profileCheckRef, {
+        userId: userId
+    })
+    await batch.commit();
+    res.status(200).json({ done: true, docRef: docRef });
+    }
+    catch (error) {
+        console.error(error)
+        res.status(500).json({ error: 'Failed to add reply to comment.' });
+    }
+  }
+    }
+  })
+})
+app.post('/api/newCommentVideoUsername', async (req, res) => {
+    const data = req.body;
+  const newComment = data.data.newComment
+  const pfp = data.data.pfp
+  console.log(newComment)
+  const notificationToken = data.data.notificationToken
+  const username = data.data.username
+  const userId = data.data.user
+  const focusedPost = data.data.focusedPost
+  const blockedUsers = data.data.blockedUsers
+  const textModerationURL = data.data.textModerationURL
+  const formData = new FormData();
+    formData.append('text', newComment);
+    formData.append('lang', 'en');
+    formData.append('mode', 'standard');
+    formData.append('api_user', `${MODERATION_API_USER}`);
+    formData.append('api_secret', `${MODERATION_API_SECRET}`);
+  
+    Promise.all([axios({
+      url: `${textModerationURL}`,
+      method:'post',
+      data: formData,
+  })]).then(async(response) => {
+    if (response[0].data) {
+      if (response[0].data.link.matches.length > 0) {
+       res.send({link: true})
+    }
+    else if (response[0].data.profanity.matches.length > 0) {
+      const containsValue = response[0].data.profanity.matches.some(obj => obj.intensity === 'high');
+    if (containsValue) {
+        res.send({profanity: true})
+    }
+    }
+    else {
+  try {
+    const batch = db.batch();
+    const docRef = db.collection('videos').doc(focusedPost.id).collection('comments')
+    const videoRef = db.collection('videos').doc(focusedPost.id)
+    const profileCommentRef = db.collection('profiles').doc(userId).collection('comments').doc(docRef.id)
+    batch.set(docRef, {
+        comment: newComment,
+        pfp: pfp,
+        blockedUsers: blockedUsers,
+        notificationToken: notificationToken,
+        username: username,
+        timestamp: FieldValue.serverTimestamp(),
+        likedBy: [],
+        replies: [],
+        user: userId,
+        postId: focusedPost.id
+    })
+    batch.update(videoRef, {
+        comments: FieldValue.increment(1)
+    })
+    batch.set(profileCommentRef, {
+        comment: newComment,
+        username: username, 
+        timestamp: FieldValue.serverTimestamp(),
+        user: userId,
+        postId: focusedPost.id
+    })
+    await batch.commit();
+    res.status(200).json({ done: true, docRef: docRef });
+    }
+    catch (error) {
+        console.error(error)
+        res.status(500).json({ error: 'Failed to add reply to comment.' });
+    }
+  }
+  }
+})
+})
+app.post('/api/newComment', async (req, res) => {
+    const data = req.body;
+  const newComment = data.data.newComment
+  const pfp = data.data.pfp
+  const notificationToken = data.data.notificationToken
+  const username = data.data.username
+  const userId = data.data.user
+  const focusedPost = data.data.focusedPost
+  const blockedUsers = data.data.blockedUsers
+  const textModerationURL = data.data.textModerationURL
+  const formData = new FormData();
+    formData.append('text', newComment);
+    formData.append('lang', 'en');
+    formData.append('mode', 'standard');
+    formData.append('api_user', `${MODERATION_API_USER}`);
+    formData.append('api_secret', `${MODERATION_API_SECRET}`);
+  
+    Promise.all([axios({
+      url: `${textModerationURL}`,
+      method:'post',
+      data: formData,
+  })]).then(async(response) => {
+    if (response[0].data) {
+      if (response[0].data.link.matches.length > 0) {
+       res.send({link: true})
+    }
+    else if (response[0].data.profanity.matches.length > 0) {
+      const containsValue = response[0].data.profanity.matches.some(obj => obj.intensity === 'high');
+    if (containsValue) {
+        res.send({profanity: true})
+    }
+    }
+    else {
+  try {
+    const batch = db.batch();
+    const docRef = db.collection('posts').doc(focusedPost.id).collection('comments').doc()
+    const postRef = db.collection('posts').doc(focusedPost.id)
+    const profileCommentRef = db.collection('profiles').doc(userId).collection('comments').doc(docRef.id)
+    const profileCheckRef = db.collection('profiles').doc(focusedPost.userId).collection('checkNotifications').doc()
+    const profileRef = db.collection('profiles').doc(focusedPost.userId).collection('notifications').doc(docRef.id)
+    batch.set(docRef, {
+        comment: newComment,
+        pfp: pfp,
+        blockedUsers: blockedUsers,
+        notificationToken: notificationToken,
+        username: username,
+        timestamp: FieldValue.serverTimestamp(),
+        likedBy: [],
+        replies: [],
+        user: userId,
+        postId: focusedPost.id
+    })
+    batch.update(postRef, {
+        comments: FieldValue.increment(1)
+    })
+    batch.set(profileRef, {
+        like: false,
+        comment: true,
+        friend: false,
+        item: newComment,
+        request: false,
+        acceptRequest: false,
+        theme: false,
+        postId: focusedPost.id,
+        report: false,
+        requestUser: userId,
+        requestNotificationToken: focusedPost.notificationToken,
+        likedBy: username,
+        timestamp: FieldValue.serverTimestamp()
+    })
+    batch.set(profileCommentRef, {
+        comment: newComment,
+        username: username, 
+        timestamp: FieldValue.serverTimestamp(),
+        user: userId,
+        postId: focusedPost.id
+    })
+    batch.set(profileCheckRef, {
+        userId: userId
+    })
+    await batch.commit();
+    res.status(200).json({ done: true, docRef: docRef });
+  }
+  catch (error) {
+        console.error(error)
+        res.status(500).json({ error: 'Failed to add reply to comment.' });
+    }
+  }
+  }
+})
+})
+app.post('/api/newCommentUsername', async (req, res) => {
+    const data = req.body;
+  const newComment = data.data.newComment
+  const pfp = data.data.pfp
+  const notificationToken = data.data.notificationToken
+  const username = data.data.username
+  const userId = data.data.user
+  const focusedPost = data.data.focusedPost
+  const blockedUsers = data.data.blockedUsers
+  const textModerationURL = data.data.textModerationURL
+  const formData = new FormData();
+    formData.append('text', newComment);
+    formData.append('lang', 'en');
+    formData.append('mode', 'standard');
+    formData.append('api_user', `${MODERATION_API_USER}`);
+    formData.append('api_secret', `${MODERATION_API_SECRET}`);
+  
+    Promise.all([axios({
+      url: `${textModerationURL}`,
+      method:'post',
+      data: formData,
+  })]).then(async(response) => {
+    if (response[0].data) {
+      if (response[0].data.link.matches.length > 0) {
+       res.send({link: true})
+    }
+    else if (response[0].data.profanity.matches.length > 0) {
+      const containsValue = response[0].data.profanity.matches.some(obj => obj.intensity === 'high');
+    if (containsValue) {
+        res.send({profanity: true})
+    }
+    }
+    else {
+  try {
+    const batch = db.batch();
+    const docRef = db.collection('posts').doc(focusedPost.id).collection('comments').doc()
+    const postRef = db.collection('posts').doc(focusedPost.id)
+    const profileCommentRef = db.collection('profiles').doc(userId).collection('comments').doc(docRef.id)
+    batch.set(docRef, {
+        comment: newComment,
+        pfp: pfp,
+        blockedUsers: blockedUsers,
+        notificationToken: notificationToken,
+        username: username,
+        timestamp: FieldValue.serverTimestamp(),
+        likedBy: [],
+        replies: [],
+        user: userId,
+        postId: focusedPost.id
+    })
+    batch.update(postRef, {
+        comments: FieldValue.increment(1)
+    })
+    batch.set(profileCommentRef, {
+        comment: newComment,
+        username: username, 
+        timestamp: FieldValue.serverTimestamp(),
+        user: userId,
+        postId: focusedPost.id
+    })
+    await batch.commit();
+    res.status(200).json({ done: true, docRef: docRef.id });
+  }
+  catch (error) {
+        console.error(error)
+        res.status(500).json({ error: 'Failed to add reply to comment.' });
+    }
+  }
+  }
+})
+})
+app.post('/api/deleteImageMessage', async (req, res) => {
+    const data = req.body
+    const item = data.data.item
+    const friendId = data.data.friendId
+    const image = data.data.image
+    try {
+      const batch = db.batch();
+      const deletedMessageRef = db.collection('deletedMessages').doc(item.id)
+      const friendRef = db.collection('friends').doc(friendId)
+      const friendChatRef = db.collection('friends').doc(friendId).collection('chats').doc(item.id)
+      batch.set(deletedMessageRef, {
+        user: item.user,
+        toUser: item.toUser,
+        timestamp: FieldValue.serverTimestamp()
+      })
+      batch.update(friendRef, {
+        messageId: null,
+        lastMessageTimestamp: FieldValue.serverTimestamp(),
+        lastMessage: null,
+        toUser: null
+      })
+      batch.delete(friendChatRef)
+      await batch.commit();
+      const filePath = decodeURIComponent(image.split('/o/')[1].split('?')[0])
+      await admin.storage().bucket().file(filePath).delete()
+      res.status(200).json({ done: true });
+    }
+    catch (error) {
+      console.error(error)
+      res.status(500).json({ error: 'Failed to delete message.' });
+    }
+  })
+app.post('/api/deleteImageMessageNewMessage', async (req, res) => {
+    const data = req.body
+    const item = data.data.item
+    const image = data.data.image
+    const friendId = data.data.friendId
+    const newMessageId = data.data.newMessageId
+    const newMessageTimestamp = data.data.newMessageTimestamp
+    try {
+      const batch = db.batch();
+      const deletedMessageRef = db.collection('deletedMessages').doc(item.id)
+      const friendChatRef = db.collection('friends').doc(friendId).collection('chats').doc(item.id)
+      const friendRef = db.collection('friends').doc(friendId)
+      batch.set(deletedMessageRef, {
+        user: item.user,
+        toUser: item.toUser,
+        timestamp: FieldValue.serverTimestamp()
+      })
+      batch.delete(friendChatRef)
+      batch.update(friendRef, {
+        messageId: newMessageId,
+        lastMessageTimestamp: newMessageTimestamp,
+        lastMessage: {text: 'User deleted message'}
+      })
+      await batch.commit();
+      const filePath = decodeURIComponent(image.split('/o/')[1].split('?')[0])
+      await admin.storage().bucket().file(filePath).delete()
+      res.status(200).json({ done: true });
+    }
+    catch (error) {
+      console.error(error)
+      res.status(500).json({ error: 'Failed to delete message.' });
+    }
+  })
+app.post('/api/deleteMessageNewMessage', async (req, res) => {
+    const data = req.body
+    const itemUser = data.data.itemUser
+    const itemToUser = data.data.itemToUser
+    const itemId = data.data.itemId
+    const friendId = data.data.friendId
+    const newMessageId = data.data.newMessageId
+    const newMessageTimestamp = data.data.newMessageTimestamp
+    await db.collection('deletedMessages').doc(itemId).set({
+      user: itemUser,
+      toUser: itemToUser,
+      timestamp: FieldValue.serverTimestamp()
+    }).then(async() => await db.collection('friends').doc(friendId).collection('chats').doc(itemId).delete())
+    .then(async() => await db.collection('friends').doc(friendId).update({
+      messageId: newMessageId,
+      lastMessageTimestamp: newMessageTimestamp,
+      lastMessage: {text: 'User deleted message'}
+    }))
+    res.send({done: true})
+  })
+app.post('/api/deleteMessage', async (req, res) => {
+    const data = req.body
+    const itemUser = data.data.itemUser
+    const itemToUser = data.data.itemToUser
+    const itemId = data.data.itemId
+    const friendId = data.data.friendId
+    await db.collection('deletedMessages').doc(itemId).set({
+      user: itemUser,
+      toUser: itemToUser,
+      timestamp: FieldValue.serverTimestamp()
+    }).then(async() => await db.collection('friends').doc(friendId).update({
+      messageId: null,
+      lastMessageTimestamp: FieldValue.serverTimestamp(),
+      lastMessage: null,
+      toUser: null
+    })).then(async() => await db.collection('friends').doc(friendId).collection('chats').doc(itemId).delete())
+    res.send({done: true})
+  })
+app.post('/api/deletePost', async (req, res) => {
+    const data = req.body;
+  const id = data.data.id
+  const userId = data.data.user
+  try {
+    const batch = db.batch();
+    const deletedRef = db.collection('deletedPosts').doc(id.id)
+    const postRef = db.collection('posts').doc(id.id)
+    const profileRef = db.collection('profiles').doc(userId).collection('posts').doc(id.id)
+    if (id.post[0].image) {
+        batch.set(deletedRef, {
+            info: id,
+            username: id.username,
+            userId: id.userId,
+            timestamp: FieldValue.serverTimestamp()
+        })
+        batch.delete(postRef)
+        batch.delete(profileRef)
+        await batch.commit();
+        const deleteFilePromises = id.post.map(async (e) => {
+            const filePath = decodeURIComponent(e.split('/o/')[1].split('?')[0]);
+            return admin.storage().bucket().file(filePath).delete();
+        });
+        // Wait for all file deletions to complete
+        await Promise.all(deleteFilePromises);
+        // Respond to the client
+        res.status(200).json({ done: true });
+    }
+    else {
+        batch.set(deletedRef, {
+            info: id,
+            username: id.username,
+            userId: id.userId,
+            timestamp: FieldValue.serverTimestamp()
+        })
+        batch.delete(postRef)
+        batch.delete(profileRef)
+        await batch.commit();
+        res.status(200).json({ done: true });
+    }
+  }
+  catch (error) {
+        console.error(error)
+        res.status(500).json({ error: 'Failed to delete post.' });
+    }
+})
+app.post('/api/uploadCliq', async (req, res) => {
+      const data = req.body
+      const id = data.data.groupId
+      const userId = data.data.user
+      const name = data.data.name 
+      const banner = data.data.banner
+      const groupSecurity = data.data.groupSecurity
+      const category = data.data.category
+      const description = data.data.description
+      const searchKeywords = data.data.searchKeywords
+      await db.collection('groups').doc(id).set({
+        banner: banner,
+        name: name.trim(),
+        flagged: 0,
+        member_count: 1,
+        groupSecurity: groupSecurity,
+        category: category,
+        description: description.trim(),
+        paused: false,
+        members: FieldValue.arrayUnion(userId),
+        admins: FieldValue.arrayUnion(userId),
+        allowPostNotifications: FieldValue.arrayUnion(userId),
+        allowMessageNotifications: FieldValue.arrayUnion(userId),
+        timestamp: FieldValue.serverTimestamp(),
+        requestsSent: [],
+        searchkeywords: searchKeywords,
+        adminContacts: [],
+        bannedUsers: []
+      }).then(async() => await db.collection('profiles').doc(userId).update({
+          groupsJoined: FieldValue.arrayUnion(id),
+          adminGroups: FieldValue.arrayUnion(id)
+        })).then(async() => await db.collection('groups').doc(id).collection('channels').doc(id).set({
+        members: FieldValue.arrayUnion(userId),
+        lastMessageTimestamp: FieldValue.serverTimestamp(),
+        name: `${name.trim()} General`,
+        security: 'public',
+        member_count: FieldValue.increment(1),
+        admins: [userId],
+        official: true,
+        allowNotifications: FieldValue.arrayUnion(userId)
+    })).then(async() => await db.collection('profiles').doc(userId).collection('channels').doc(id).set({
+        channelsJoined: FieldValue.arrayUnion(id)
+    })).then(async() => await db.collection('groups').doc(id).collection('profiles').doc(userId).set({
+      searchKeywords: searchKeywords
+    }))
+    res.send({done: true})
+    })
+app.post('/api/uploadStory', async(req, res) => {
+        const data = req.body
+        const userId = data.data.user
+        const background = data.data.background
+        const forSale = data.data.forSale
+        const post = data.data.post
+        const docRef = await db.collection('profiles').doc(userId).collection('stories').add({
+          userId: userId,
+          
+          post: post,
+          forSale: forSale,
+          reportedIds: [],
+          
+          likedBy: [],
+
+          usersSeen: [],
+         
+          timestamp: FieldValue.serverTimestamp(),
+          background: background
+      })
+      res.send({done: true})
+  })
+  app.post('/api/profilepostnotsell', async (req, res) => {
+      const data = req.body
+      const userId = data.data.user
+      const url = data.data.url
+      const sellChecked = data.data.sellChecked
+      const themeName = data.data.themeName
+      const price = data.data.price
+      const keywords = data.data.keywords
+      const originalKeywords = data.data.originalKeywords
+      try {
+        const batch = db.batch();
+        const profileRef = db.collection('profiles').doc(userId)
+        const myRef = db.collection('profiles').doc(userId).collection('myThemes').doc()
+        batch.update(profileRef, {
+          background: url,
+          postBackground: url,
+          themeName: themeName.trim(),
+          free: Number.parseFloat(price) > 0 ? false : true,
+          forSale: sellChecked ? true: false,
+          postBought: sellChecked ? true: false,
+          credits: FieldValue.increment(-1)
+        })
+        batch.set(myRef, {
+          timestamp: FieldValue.serverTimestamp(),
+          images: FieldValue.arrayUnion(url),
+          active: true,
+          name: themeName.trim(),
+          keywords: originalKeywords,
+          searchKeywords: keywords,
+          bought: false,
+          forSale: sellChecked ? true: false,
+          price: Number.parseFloat(price),
+        })
+        await batch.commit();
+        res.status(200).json({ done: true });
+      } 
+      catch (error) {
+        console.error("Error processing request: ", error);
+        res.status(500).send("Error processing request"); 
+      }
+    })
+    app.post('/api/postnotprofilenotsell', async (req, res) => {
+      const data = req.body
+      const userId = data.data.user
+      const url = data.data.url
+      const sellChecked = data.data.sellChecked
+      const themeName = data.data.themeName
+      const price = data.data.price
+      const keywords = data.data.keywords
+      const originalKeywords = data.data.originalKeywords
+      try {
+        const batch = db.batch();
+        const myRef = db.collection('profiles').doc(userId).collection('myThemes').doc()
+        const profileRef = db.collection('profiles').doc(userId)
+        batch.set(myRef, {
+          timestamp: FieldValue.serverTimestamp(),
+          images: FieldValue.arrayUnion(url),
+          active: true,
+          name: themeName.trim(),
+          keywords: originalKeywords,
+          searchKeywords: keywords,
+          bought: false,
+          price: Number.parseFloat(price),
+          forSale: sellChecked ? true: false,
+        })
+        batch.update(profileRef, {
+          postBackground: url,
+          free: Number.parseFloat(price) > 0 ? false : true,
+          themeName: themeName.trim(),
+          credits: FieldValue.increment(-1),
+          postBought: sellChecked ? true: false
+        })
+        await batch.commit();
+        res.status(200).json({ done: true });
+      }
+      catch (error){
+        console.error(error);
+        res.status(500).send("Error")
+      }
+    })
+    app.post('/api/sellpostnotprofile', async (req, res) => {
+      const data = req.body
+      const userId = data.data.user
+      const url = data.data.url
+      const sellChecked = data.data.sellChecked
+      const themeName = data.data.themeName
+      const price = data.data.price
+      const keywords = data.data.keywords
+      const originalKeywords = data.data.originalKeywords
+      try {
+        const batch = db.batch();
+        const profileRef = db.collection('profiles').doc(userId)
+        const docRef = db.collection('profiles').doc(userId).collection('myThemes').doc()
+        const freeRef = db.collection('freeThemes').doc(docRef.id)
+        batch.update(profileRef, {
+          postBackground: url,
+          postBought: sellChecked ? true: false,
+          credits: FieldValue.increment(-1)
+        })
+        batch.set(docRef, {
+          timestamp: FieldValue.serverTimestamp(),
+          images: FieldValue.arrayUnion(url),
+          keywords: originalKeywords,
+          searchKeywords: keywords,
+          active: true,
+          name: themeName.trim(),
+          bought: false,
+          price: Number.parseFloat(price),
+          forSale: sellChecked ? true: false,
+        })
+        batch.set(freeRef, {
+          timestamp: FieldValue.serverTimestamp(),
+          images: FieldValue.arrayUnion(url),
+          active: true,
+          userId: userId,
+          name: themeName.trim(),
+          keywords: originalKeywords,
+          searchKeywords: keywords,
+          bought: false,
+          forSale: sellChecked ? true: false,
+          bought_count: 0,
+          stripe_metadata_price: 0
+        })
+        await batch.commit();
+        res.status(200).json({ done: true });
+      }
+      catch (error) {
+        console.error(error)
+        res.status(500).send("Error")
+      }
+    })
+    app.post('/api/sellprofilenotpost', async (req, res) => {
+      const data = req.body
+      const userId = data.data.user
+      const url = data.data.url
+      const sellChecked = data.data.sellChecked
+      const themeName = data.data.themeName
+      const price = data.data.price
+      const keywords = data.data.keywords
+      const originalKeywords = data.data.originalKeywords
+      try {
+        const batch = db.batch();
+        const profileRef = db.collection('profiles').doc(userId)
+        const docRef = db.collection('profiles').doc(userId).collection('myThemes').doc();
+        const freeRef = db.collection('freeThemes').doc(docRef.id)
+        batch.update(profileRef, {
+          background: url,
+          free: Number.parseFloat(price) > 0 ? false : true,
+          forSale: sellChecked ? true: false,
+          credits: FieldValue.increment(-1)
+        })
+        batch.set(docRef, {
+          timestamp: FieldValue.serverTimestamp(),
+          images: FieldValue.arrayUnion(url),
+          active: true,
+          name: themeName.trim(),
+          keywords: originalKeywords,
+          searchKeywords: keywords,
+          bought: false,
+          price: Number.parseFloat(price),
+          forSale: sellChecked ? true: false,
+        })
+        batch.set(freeRef, {
+          timestamp: FieldValue.serverTimestamp(),
+          images: FieldValue.arrayUnion(url),
+          active: true,
+          name: themeName.trim(),
+          keywords: originalKeywords,
+          searchKeywords: keywords,
+          bought: false,
+          forSale: sellChecked ? true: false,
+          bought_count: 0,
+          userId: userId,
+          stripe_metadata_price: 0
+        })
+        await batch.commit();
+        res.status(200).json({ done: true });
+    }
+    catch (error) {
+      console.error(error)
+      res.status(500).send("Error")
+    }
+    })
+  app.post('/api/profilenotpostnotsell', async (req, res) => {
+      const data = req.body
+      const userId = data.data.user
+      const url = data.data.url
+      const sellChecked = data.data.sellChecked
+      const themeName = data.data.themeName
+      const price = data.data.price
+      const keywords = data.data.keywords
+      const originalKeywords = data.data.originalKeywords
+      try {
+        const batch = db.batch();
+        const profileRef = db.collection('profiles').doc(userId)
+        const myRef = db.collection('profiles').doc(userId).collection('myThemes').doc()
+        batch.update(profileRef, {
+          background: url,
+          free: Number.parseFloat(price) > 0 ? false : true,
+          forSale: sellChecked ? true: false,
+          credits: FieldValue.increment(-1)
+        })
+        batch.set(myRef, {
+          timestamp: FieldValue.serverTimestamp(),
+          images: FieldValue.arrayUnion(url),
+          active: true,
+          name: themeName.trim(),
+          keywords: originalKeywords,
+          searchKeywords: keywords,
+          bought: false,
+          price: Number.parseFloat(price),
+          forSale: sellChecked ? true: false,
+        })
+        await batch.commit();
+        res.status(200).json({ done: true });
+      }
+      catch (error) {
+        console.error(error)
+        res.status(500).send("Error")
+      }
+    })
+  app.post('/api/sellprofilepost', async (req, res) => {
+      const data = req.body
+      const userId = data.data.user
+      const url = data.data.url
+      const sellChecked = data.data.sellChecked
+      const themeName = data.data.themeName
+      const price = data.data.price
+      const keywords = data.data.keywords
+      const originalKeywords = data.data.originalKeywords
+      try {
+        const batch = db.batch();
+        const profileRef = db.collection('profiles').doc(userId)
+        const docRef = db.collection('profiles').doc(userId).collection('myThemes').doc()
+        const freeRef = db.collection('freeThemes').doc(docRef.id)
+        batch.update(profileRef, {
+          background: url,
+          postBackground: url,
+          forSale: sellChecked ? true: false,
+          postBought: sellChecked ? true: false,
+          free: Number.parseFloat(price) > 0 ? false : true,
+          themeName: themeName.trim(),
+          credits: FieldValue.increment(-1)
+        })
+        batch.set(docRef, {
+          timestamp: FieldValue.serverTimestamp(),
+          images: FieldValue.arrayUnion(url),
+          active: true,
+          name: themeName.trim(),
+          keywords: originalKeywords,
+          searchKeywords: keywords,
+          bought: false,
+          forSale: sellChecked ? true: false,
+          price: Number.parseFloat(price),
+        })
+        batch.set(freeRef, {
+          timestamp: FieldValue.serverTimestamp(),
+          images: FieldValue.arrayUnion(url),
+          active: true,
+          name: themeName.trim(),
+          keywords: originalKeywords,
+          searchKeywords: keywords,
+          bought: false,
+          forSale: sellChecked ? true: false,
+          bought_count: 0,
+          userId: userId,
+          stripe_metadata_price: 0
+        })
+        await batch.commit();
+        res.status(200).json({ done: true });
+      } 
+      catch (error) {
+        console.error("Error processing request: ", error);
+        res.status(500).send("Error processing request"); 
+      }
+    })
+app.post('/api/sellnotprofilenotpost', async (req, res) => {
+  const data = req.body;
+  const userId = data.data.user;
+  const url = data.data.url;
+  const sellChecked = data.data.sellChecked;
+  const themeName = data.data.themeName;
+  const price = data.data.price;
+  const keywords = data.data.keywords;
+  const originalKeywords = data.data.originalKeywords;
+
+  try {
+    const batch = db.batch();
+    const freeRef = db.collection('freeThemes').doc()
+    const myRef = db.collection('profiles').doc(userId).collection('myThemes').doc()
+    const profileRef = db.collection('profiles').doc(userId)
+    batch.set(freeRef, {
+      timestamp: FieldValue.serverTimestamp(),
+      images: FieldValue.arrayUnion(url),
+      userId: userId,
+      active: true,
+      name: themeName.trim(),
+      keywords: originalKeywords,
+      searchKeywords: keywords,
+      bought: false,
+      forSale: sellChecked ? true : false,
+      bought_count: 0,
+      stripe_metadata_price: 0
+    })
+    batch.set(myRef, {
+      timestamp: FieldValue.serverTimestamp(),
+      images: FieldValue.arrayUnion(url),
+      active: true,
+      name: themeName.trim(),
+      keywords: originalKeywords,
+      searchKeywords: keywords,
+      bought: false,
+      price: Number.parseFloat(price),
+      forSale: sellChecked ? true : false
+    })
+    batch.update(profileRef, {
+      credits: FieldValue.increment(-1)
+    })
+    await batch.commit();
+    res.status(200).json({ done: true });
+  } catch (error) {
+    console.error("Error processing request: ", error);
+    res.status(500).send("Error processing request"); 
+  }
+});
+app.post('/api/notsellnotprofilenotpost', async (req, res) => {
+    const data = req.body
+    const userId = data.data.user
+    const url = data.data.url
+    const sellChecked = data.data.sellChecked
+    const themeName = data.data.themeName
+    const price = data.data.price
+    const keywords = data.data.keywords
+    const originalKeywords = data.data.originalKeywords
+    try {
+      const batch = db.batch();
+      const myRef = db.collection('profiles').doc(userId).collection('myThemes').doc()
+      const profileRef = db.collection('profiles').doc(userId)
+      batch.set(myRef, {
+        timestamp: FieldValue.serverTimestamp(),
+        images: FieldValue.arrayUnion(url),
+        active: true,
+        name: themeName.trim(),
+        keywords: originalKeywords,
+        searchKeywords: keywords,
+        bought: false,
+        price: Number.parseFloat(price),
+        forSale: sellChecked ? true: false
+      })
+      batch.update(profileRef, {
+        credits: FieldValue.increment(-1)
+      })
+      await batch.commit();
+      res.status(200).json({ done: true });
+    } catch (error) {
+      console.error(error)
+      res.status(500).send("Error")
+    }
+  })
+app.post('/api/newReplyToReplyVideo', async(req, res) => {
+  const data = req.body
+  const focusedPost = data.data.focusedPost
+  const tempCommentId = data.data.tempCommentId
+  const newReply = data.data.newReply
+  const commentSnap = data.data.commentSnap
+  const reply = data.data.reply
+  const userId = data.data.user
+  const username = data.data.username
+  const textModerationURL = data.data.textModerationURL
+  const formData = new FormData();
+    formData.append('text', newReply.reply);
+    formData.append('lang', 'en');
+    formData.append('mode', 'standard');
+    formData.append('api_user', `${MODERATION_API_USER}`);
+    formData.append('api_secret', `${MODERATION_API_SECRET}`);
+  
+    Promise.all([axios({
+      url: `${textModerationURL}`,
+      method:'post',
+      data: formData,
+  })]).then(async(response) => {
+    if (response[0].data) {
+      if (response[0].data.link.matches.length > 0) {
+       res.send({link: true})
+    }
+    else if (response[0].data.profanity.matches.length > 0) {
+      const containsValue = response[0].data.profanity.matches.some(obj => obj.intensity === 'high');
+    if (containsValue) {
+        res.send({profanity: true})
+    }
+    }
+    else {
+      try {
+              // Initialize a Firestore batch
+          const batch = db.batch();
+          const commentDocRef = db
+                  .collection('videos')
+                  .doc(focusedPost.id)
+                  .collection('comments')
+                  .doc(tempCommentId);
+          // Reference to the video document
+          const videoDocRef = db.collection('videos').doc(focusedPost.id);
+          const profileRef = db.collection('profiles').doc(commentSnap.user).collection('notifications').doc()
+          const profileCheckRef = db.collection('profiles').doc(commentSnap.user).collection('checkNotifications').doc()
+          batch.update(commentDocRef, {
+              replies: FieldValue.arrayUnion(newReply),
+          });
+          batch.update(videoDocRef, {
+              comments: FieldValue.increment(1),
+          });
+          batch.set(profileRef, {
+              like: false,
+              reply: true,
+              friend: false,
+              item: reply,
+              request: false,
+              acceptRequest: false,
+              postId: focusedPost.id, 
+              theme: false,
+              report: false,
+              requestUser: userId,
+              requestNotificationToken: focusedPost.notificationToken,
+              likedBy: username,
+              timestamp: FieldValue.serverTimestamp()
+          })
+          batch.set(profileCheckRef, {
+              userId: userId
+          })
+          await batch.commit();
+          res.status(200).json({ done: true });
+        } catch (error) {
+          console.error(error)
+          res.status(500).json({ error: 'Failed to add reply to comment.' });
+        }
+    }
+  } else {
+    res.send({error: true})
+  }
+})
+})
+app.post('/api/newReplyToReplyUsername', async(req, res) => {
+  const data = req.body
+  const focusedPost = data.data.focusedPost
+  const tempCommentId = data.data.tempCommentId
+  const newReply = data.data.newReply
+  const textModerationURL = data.data.textModerationURL
+  const formData = new FormData();
+    formData.append('text', newReply.reply);
+    formData.append('lang', 'en');
+    formData.append('mode', 'standard');
+    formData.append('api_user', `${MODERATION_API_USER}`);
+    formData.append('api_secret', `${MODERATION_API_SECRET}`);
+  
+    Promise.all([axios({
+      url: `${textModerationURL}`,
+      method:'post',
+      data: formData,
+  })]).then(async(response) => {
+    if (response[0].data) {
+      if (response[0].data.link.matches.length > 0) {
+       res.send({link: true})
+    }
+    else if (response[0].data.profanity.matches.length > 0) {
+      const containsValue = response[0].data.profanity.matches.some(obj => obj.intensity === 'high');
+    if (containsValue) {
+        res.send({profanity: true})
+    }
+    }
+    else {
+      try {
+        const batch = db.batch();
+        const commentRef = db.collection('posts').doc(focusedPost.id).collection('comments').doc(tempCommentId)
+        const postRef = db.collection('posts').doc(focusedPost.id)
+        batch.update(commentRef, {
+          replies: FieldValue.arrayUnion(newReply)
+        })
+        batch.update(postRef, {
+          comments: FieldValue.increment(1)
+        })
+        await batch.commit();
+        res.status(200).json({ done: true});
+      }
+      catch (error) {
+        console.error(error);
+        res.status(500).send({error: true});
+      }
+    }
+  } else {
+    res.send({error: true})
+  }
+})
+})
+app.post('/api/newReplyToReplyVideoUsername', async(req, res) => {
+  const data = req.body
+  const focusedPost = data.data.focusedPost
+  const tempCommentId = data.data.tempCommentId
+  const newReply = data.data.newReply
+  const textModerationURL = data.data.textModerationURL
+  const formData = new FormData();
+    formData.append('text', newReply.reply);
+    formData.append('lang', 'en');
+    formData.append('mode', 'standard');
+    formData.append('api_user', `${MODERATION_API_USER}`);
+    formData.append('api_secret', `${MODERATION_API_SECRET}`);
+  
+    Promise.all([axios({
+      url: `${textModerationURL}`,
+      method:'post',
+      data: formData,
+  })]).then(async(response) => {
+    if (response[0].data) {
+      if (response[0].data.link.matches.length > 0) {
+       res.send({link: true})
+    }
+    else if (response[0].data.profanity.matches.length > 0) {
+      const containsValue = response[0].data.profanity.matches.some(obj => obj.intensity === 'high');
+    if (containsValue) {
+        res.send({profanity: true})
+    }
+    }
+    else {
+      try {
+              // Initialize a Firestore batch
+              const batch = db.batch();
+              // Reference to the specific comment document
+              const commentDocRef = db
+                  .collection('videos')
+                  .doc(focusedPost.id)
+                  .collection('comments')
+                  .doc(tempCommentId);
+              // Reference to the video document
+              const videoDocRef = db.collection('videos').doc(focusedPost.id);
+              // Add update operations to the batch
+              batch.update(commentDocRef, {
+                  replies: FieldValue.arrayUnion(newReply),
+              });
+              batch.update(videoDocRef, {
+                  comments: FieldValue.increment(1),
+              });
+      
+              // Commit the batch
+              await batch.commit();
+              res.status(200).json({ done: true });
+          } catch (error) {
+              console.error('Error adding reply to comment:', error);
+              res.status(500).json({ error: 'Failed to add reply to comment.' });
+          }
+    }
+  } else {
+    res.send({error: true})
+
+  }
+})
+})
+app.post('/api/newReplyToReply', async(req, res) => {
+  const data = req.body
+  const focusedPost = data.data.focusedPost
+  const tempCommentId = data.data.tempCommentId
+  const newReply = data.data.newReply
+  const commentSnap = data.data.commentSnap
+  const reply = data.data.reply
+  const userId = data.data.user
+  const username = data.data.username
+  const textModerationURL = data.data.textModerationURL
+  const formData = new FormData();
+    formData.append('text', newReply.reply);
+    formData.append('lang', 'en');
+    formData.append('mode', 'standard');
+    formData.append('api_user', `${MODERATION_API_USER}`);
+    formData.append('api_secret', `${MODERATION_API_SECRET}`);
+  
+    Promise.all([axios({
+      url: `${textModerationURL}`,
+      method:'post',
+      data: formData,
+  })]).then(async(response) => {
+    if (response[0].data) {
+      if (response[0].data.link.matches.length > 0) {
+       res.send({link: true})
+    }
+    else if (response[0].data.profanity.matches.length > 0) {
+      const containsValue = response[0].data.profanity.matches.some(obj => obj.intensity === 'high');
+    if (containsValue) {
+        res.send({profanity: true})
+    }
+    }
+    else {
+      try {
+    const batch = db.batch();
+    console.log(reply)
+    const postCommentRef = db.collection('posts').doc(focusedPost.id).collection('comments').doc(tempCommentId)
+    const postRef = db.collection('posts').doc(focusedPost.id)
+    const profileRef = db.collection('profiles').doc(commentSnap.user).collection('notifications').doc()
+    const profileCheckRef = db.collection('profiles').doc(commentSnap.user).collection('checkNotifications').doc()
+    batch.update(postCommentRef, {
+        replies: FieldValue.arrayUnion(newReply)
+    })
+    batch.update(postRef, {
+        comments: FieldValue.increment(1)
+    })
+    batch.set(profileRef, {
+        like: false,
+        reply: true,
+        friend: false,
+        item: reply,
+        request: false,
+        acceptRequest: false,
+        postId: focusedPost.id,
+        theme: false,
+        report: false,
+        requestUser: userId,
+        requestNotificationToken: focusedPost.notificationToken,
+        likedBy: username,
+        timestamp: FieldValue.serverTimestamp()
+    })
+    batch.set(profileCheckRef, {
+        userId: userId
+    })
+    await batch.commit();
+    res.status(200).json({ done: true });
+  }
+  catch (error) {
+    console.error(error)
+    res.status(500).json({ error: 'Failed to add reply to comment.' });
+  }
+    }
+  } else {
+    res.send({error: true})
+  }
+})
+})
+app.post('/api/newReplyVideo', async(req, res) => {
+  const data = req.body
+  const focusedPost = data.data.focusedPost
+  const tempReplyId = data.data.tempReplyId
+  const newReply = data.data.newReply
+  const commentSnap = data.data.commentSnap
+  const reply = data.data.reply
+  const userId = data.data.user
+  const username = data.data.username
+  const textModerationURL = data.data.textModerationURL
+  const formData = new FormData();
+    formData.append('text', newReply.reply);
+    formData.append('lang', 'en');
+    formData.append('mode', 'standard');
+    formData.append('api_user', `${MODERATION_API_USER}`);
+    formData.append('api_secret', `${MODERATION_API_SECRET}`);
+  
+    Promise.all([axios({
+      url: `${textModerationURL}`,
+      method:'post',
+      data: formData,
+  })]).then(async(response) => {
+    if (response[0].data) {
+      if (response[0].data.link.matches.length > 0) {
+       res.send({link: true})
+    }
+    else if (response[0].data.profanity.matches.length > 0) {
+      const containsValue = response[0].data.profanity.matches.some(obj => obj.intensity === 'high');
+    if (containsValue) {
+        res.send({profanity: true})
+    }
+    }
+    else {
+      try {   
+              const batch = db.batch();
+              const videoCommentRef = db.collection('videos').doc(focusedPost.id).collection('comments').doc(tempReplyId)
+              const videoRef = db.collection('videos').doc(focusedPost.id)
+              const profileRef = db.collection('profiles').doc(commentSnap.user).collection('notifications').doc()
+              const profileCheckRef = db.collection('profiles').doc(commentSnap.user).collection('checkNotifications').doc()
+              batch.update(videoCommentRef, {
+                  replies: FieldValue.arrayUnion(newReply)
+              })
+              batch.update(videoRef, {
+                  comments: FieldValue.increment(1)
+              })
+              batch.set(profileRef, {
+                  like: false,
+                  reply: true,
+                  friend: false,
+                  item: reply,
+                  request: false,
+                  acceptRequest: false,
+                  theme: false,
+                  report: false,
+                  requestUser: userId,
+                  postId: focusedPost.id,
+                  requestNotificationToken: focusedPost.notificationToken,
+                  likedBy: username,
+                  timestamp: FieldValue.serverTimestamp()
+              })
+              batch.set(profileCheckRef, {
+                  userId: userId
+              })
+              await batch.commit();
+              res.status(200).json({ done: true });
+          }
+          catch (error) {
+              console.error(error)
+              res.status(500).json({ error: 'Failed to add reply to comment.' });
+          }
+  }
+} else {
+  res.send({error: true})
+}
+  })
+})
+app.post('/api/addFriend', async(req,res) => {
+              const data = req.body
+              const newFriend = data.data.newFriend
+              const item = data.data.item
+              const username = data.data.username
+              const smallKeywords = data.data.smallKeywords
+              const largeKeywords = data.data.largeKeywords
+              const userId = data.data.user
+              let privacy = (await db.collection('profiles').doc(item.userId).get()).data().private
+              let friendUsername = (await db.collection('profiles').doc(item.userId).get()).data().searchusername
+              let friendSmallkeywords = (await db.collection('profiles').doc(item.userId).get()).data().smallKeywords
+              let friendLargekeywords = (await db.collection('profiles').doc(item.userId).get()).data().largeKeywords
+              let existingUserFriend = (await db.collection('profiles').doc(userId).collection('friends').doc(item.userId).get())
+              let existingFriend = (await db.collection('profiles').doc(item.userId).collection('friends').doc(userId).get())
+              let message = (await db.collection('friends').doc(newFriend).get())
+              if (existingUserFriend.exists && existingFriend.exists) {
+                if (existingUserFriend.data().actualFriend == false && existingFriend.data().actualFriend == true) {
+                  if (privacy) {
+                    await db.collection('profiles').doc(userId).collection('requests').doc(item.userId).set({
+                      id: item.userId,
+                    actualRequest: true,
+                    timestamp: FieldValue.serverTimestamp()
+                    }).then(async() => await db.collection('profiles').doc(item.userId).collection('requests').doc(userId).set({
+                    id: userId,
+                    actualRequest: false,
+                    timestamp: FieldValue.serverTimestamp()
+                  })).then(() => db.collection('profiles').doc(item.userId).collection('notifications').add({
+                    like: false,
+                    comment: false,
+                    friend: true,
+                    item: null,
+                    request: true,
+                    acceptRequest: false,
+                    postId: item.id,
+                    theme: false,
+                    report: false,
+                    requestUser: userId,
+                    requestNotificationToken: item.notificationToken,
+                    likedBy: [],
+                    timestamp: FieldValue.serverTimestamp()
+                  })).then(() => db.collection('profiles').doc(item.userId).collection('checkNotifications').add({
+                    userId: item.userId
+                  }))
+                 res.send({ request: true, friend: false })
+                  }
+                  else if (!privacy) {
+                    await db.collection('profiles').doc(userId).collection('friends').doc(item.userId).set({
+                    friendId: newFriend,
+                    actualFriend: true,
+                    searchusername: friendUsername,
+                    smallKeywords: friendSmallkeywords,
+                    largeKeywords: friendLargekeywords,
+                    previousFriend: true,
+                    timestamp: FieldValue.serverTimestamp(),
+                    lastMessageTimestamp: FieldValue.serverTimestamp(),
+                  }).then(async() => await db.collection('profiles').doc(item.userId).collection('friends').doc(userId).set({
+                    friendId: newFriend,
+                    actualFriend: true,
+                    searchusername: username.toLowerCase(),
+                    smallKeywords: smallKeywords,
+                    largeKeywords: largeKeywords,
+                    previousFriend: true,
+                    timestamp: FieldValue.serverTimestamp(),
+                    lastMessageTimestamp: FieldValue.serverTimestamp()
+                  })).then(message.exists ? async() => await db.collection('friends').doc(newFriend).update({
+                      active: true,
+                      users: [item.userId, userId]
+                    }) : async() => await db.collection('friends').doc(newFriend).set({
+                      lastMessageTimestamp: FieldValue.serverTimestamp(),
+                      active: true,
+                      users: [item.userId, userId]
+                    })).then(() => db.collection('profiles').doc(item.userId).collection('notifications').add({
+                    like: false,
+                    comment: false,
+                    friend: true,
+                    item: null,
+                    request: false,
+                    acceptRequest: false,
+                    postId: null,
+                    theme: false,
+                    report: false,
+                    requestUser: userId,
+                    requestNotificationToken: item.notificationToken,
+                    likedBy: [],
+                    timestamp: FieldValue.serverTimestamp()
+                  })).then(() => db.collection('profiles').doc(item.userId).collection('checkNotifications').add({
+                    userId: item.userId
+                  })).then(async() => await db.collection('profiles').doc(userId).update({
+                    following: FieldValue.arrayUnion(item.userId)
+                  })).then(async() => await db.collection('profiles').doc(item.userId).update({
+                    followers: FieldValue.arrayUnion(userId)
+                  }))
+                 res.send({ request: false, friend: true })
+                  }
+                    
+                    }
+                else if (existingUserFriend.data().actualFriend == false && existingFriend.data().actualFriend == false) {
+                  if (privacy) {
+                    await db.collection('profiles').doc(userId).collection('requests').doc(item.userId).set({
+                    id: item.userId,
+                    actualRequest: true,
+                    timestamp: FieldValue.serverTimestamp()
+                  }).then(async() => await db.collection('profiles').doc(item.userId).collection('requests').doc(userId).set({
+                    id: userId,
+                    actualRequest: false,
+                    timestamp: FieldValue.serverTimestamp()
+                  })).then(() => db.collection('profiles').doc(item.userId).collection('notifications').add({
+                    like: false,
+                    comment: false,
+                    friend: true,
+                    item: null,
+                    request: true,
+                    acceptRequest: false,
+                    postId: item.id,
+                    theme: false,
+                    report: false,
+                    requestUser: userId,
+                    requestNotificationToken: item.notificationToken,
+                    likedBy: [],
+                    timestamp: FieldValue.serverTimestamp()
+                  })).then(() => db.collection('profiles').doc(item.userId).collection('checkNotifications').add({
+                    userId: item.userId
+                  }))
+                 res.send({ request: true, friend: false })
+                  }
+                  else if (!privacy) {
+                    
+                       await db.collection('profiles').doc(userId).collection('friends').doc(item.userId).set({
+                    friendId: newFriend,
+                    actualFriend: true,
+                    previousFriend: true,
+                    timestamp: FieldValue.serverTimestamp(),
+                    lastMessageTimestamp: FieldValue.serverTimestamp()
+                  }).then(async() => await db.collection('profiles').doc(item.userId).collection('friends').doc(userId).set({
+                    friendId: newFriend,
+                    actualFriend: false,
+                    previousFriend: true,
+                    timestamp: FieldValue.serverTimestamp(),
+                    lastMessageTimestamp: FieldValue.serverTimestamp()
+                  })).then(async() => await db.collection('profiles').doc(userId).update({
+                    following: FieldValue.arrayUnion(item.userId)
+                  })).then(async() => await db.collection('profiles').doc(item.userId).update({
+                    followers: FieldValue.arrayUnion(userId)
+                  })).then(() => db.collection('profiles').doc(item.userId).collection('notifications').add({
+                    like: false,
+                    comment: false,
+                    friend: true,
+                    item: null,
+                    request: false,
+                    acceptRequest: false,
+                    postId: item.id,
+                    theme: false,
+                    report: false,
+                    requestUser: userId,
+                    requestNotificationToken: item.notificationToken,
+                    likedBy: [],
+                    timestamp: FieldValue.serverTimestamp()
+                  })).then(() => db.collection('profiles').doc(item.userId).collection('checkNotifications').add({
+                    userId: item.userId
+                  }))
+                 res.send({ request: false, friend: true })
+                  }
+                }
+                  }
+              else {
+                if (privacy) {
+                    await db.collection('profiles').doc(userId).collection('requests').doc(item.userId).set({
+                    id: item.userId,
+                    actualRequest: true,
+                    timestamp: FieldValue.serverTimestamp()
+                  }).then(async() => await db.collection('profiles').doc(item.userId).collection('requests').doc(userId).set({
+                    id: userId,
+                    actualRequest: false,
+                    timestamp: FieldValue.serverTimestamp()
+                  })).then(() => db.collection('profiles').doc(item.userId).collection('notifications').add({
+                    like: false,
+                    comment: false,
+                    friend: true,
+                    item: null,
+                    request: true,
+                    acceptRequest: false,
+                    postId: item.id,
+                    theme: false,
+                    report: false,
+                    requestUser: userId,
+                    requestNotificationToken: item.notificationToken,
+                    likedBy: [],
+                    timestamp: FieldValue.serverTimestamp()
+                  })).then(() => db.collection('profiles').doc(item.userId).collection('checkNotifications').add({
+                    userId: item.userId
+                  }))
+                 res.send({ request: true, friend: false })
+                  }
+                  else if (!privacy) {
+                        await db.collection('profiles').doc(userId).collection('friends').doc(item.userId).set({
+                    friendId: newFriend,
+                    actualFriend: true,
+                    previousFriend: false,
+                    timestamp: FieldValue.serverTimestamp(),
+                    lastMessageTimestamp: FieldValue.serverTimestamp()
+                  }).then(async() => await db.collection('profiles').doc(item.userId).collection('friends').doc(userId).set({
+                    friendId: newFriend,
+                    actualFriend: false,
+                    previousFriend: true,
+                    timestamp: FieldValue.serverTimestamp(),
+                    lastMessageTimestamp: FieldValue.serverTimestamp()
+                  })).then(async() => await db.collection('profiles').doc(userId).update({
+                    following: FieldValue.arrayUnion(item.userId)
+                  })).then(async() => await db.collection('profiles').doc(item.userId).update({
+                    followers: FieldValue.arrayUnion(userId)
+                  })).then(() => db.collection('profiles').doc(item.userId).collection('notifications').add({
+                    like: false,
+                    comment: false,
+                    friend: true,
+                    item: null,
+                    request: false,
+                    acceptRequest: false,
+                    postId: item.id,
+                    theme: false,
+                    report: false,
+                    requestUser: userId,
+                    requestNotificationToken: item.notificationToken,
+                    likedBy: [],
+                    timestamp: FieldValue.serverTimestamp()
+                  })).then(() => db.collection('profiles').doc(item.userId).collection('checkNotifications').add({
+                    userId: item.userId
+                  }))
+                 res.send({ request: false, friend: true })
+                      }
+              }
+            })
+app.post('/api/addFriendTwo', async(req,res) => {
+              const data = req.body
+              const newFriend = data.data.newFriend
+              const item = data.data.item
+              const userId = data.data.user
+              const username = data.data.username
+              const largeKeywords = data.data.largeKeywords
+              const smallKeywords = data.data.smallKeywords
+              let privacy = (await db.collection('profiles').doc(item.id).get()).data().private
+              let friendUsername = (await db.collection('profiles').doc(item.id).get()).data().searchusername
+              let friendSmallkeywords = (await db.collection('profiles').doc(item.id).get()).data().smallKeywords
+              let friendLargekeywords = (await db.collection('profiles').doc(item.id).get()).data().largeKeywords
+              let existingUserFriend = (await db.collection('profiles').doc(userId).collection('friends').doc(item.id).get())
+              let existingFriend = (await db.collection('profiles').doc(item.id).collection('friends').doc(userId).get())
+              let message = (await db.collection('friends').doc(newFriend).get())
+              if (existingUserFriend.exists && existingFriend.exists) {
+                if (existingUserFriend.data().actualFriend == false && existingFriend.data().actualFriend == true) {
+                  if (privacy) {
+                    await db.collection('profiles').doc(userId).collection('requests').doc(item.id).set({
+                      id: item.id,
+                    actualRequest: true,
+                    timestamp: FieldValue.serverTimestamp()
+                    }).then(async() => await db.collection('profiles').doc(item.id).collection('requests').doc(userId).set({
+                    id: userId,
+                    actualRequest: false,
+                    timestamp: FieldValue.serverTimestamp()
+                  })).then(() => db.collection('profiles').doc(item.id).collection('notifications').add({
+                    like: false,
+                    comment: false,
+                    friend: true,
+                    item: null,
+                    request: true,
+                    acceptRequest: false,
+                    postId: item.id,
+                    theme: false,
+                    report: false,
+                    requestUser: userId,
+                    requestNotificationToken: item.notificationToken,
+                    likedBy: [],
+                    timestamp: FieldValue.serverTimestamp()
+                  })).then(() => db.collection('profiles').doc(item.id).collection('checkNotifications').add({
+                    userId: item.id
+                  }))
+                  res.send({ request: true, friend: false })
+                   // Explicitly return the object
+                  }
+                  else if (!privacy) {
+                    await db.collection('profiles').doc(userId).collection('friends').doc(item.id).set({
+                    friendId: newFriend,
+                    actualFriend: true,
+                    searchusername: friendUsername,
+                    smallKeywords: friendSmallkeywords,
+                    largeKeywords: friendLargekeywords,
+                    previousFriend: true,
+                    timestamp: FieldValue.serverTimestamp(),
+                    lastMessageTimestamp: FieldValue.serverTimestamp(),
+                  }).then(async() => await db.collection('profiles').doc(item.id).collection('friends').doc(userId).set({
+                    friendId: newFriend,
+                    actualFriend: true,
+                    searchusername: username.toLowerCase(),
+                    smallKeywords: smallKeywords,
+                    largeKeywords: largeKeywords,
+                    previousFriend: true,
+                    timestamp: FieldValue.serverTimestamp(),
+                    lastMessageTimestamp: FieldValue.serverTimestamp()
+                  })).then(message.exists ? async() => await db.collection('friends').doc(newFriend).update({
+                      active: true,
+                      users: [item.id, userId]
+                    }) : await db.collection('friends').doc(newFriend).set({
+                      lastMessageTimestamp: FieldValue.serverTimestamp(),
+                      active: true,
+                      users: [item.id, userId]
+                    })).then(() => db.collection('profiles').doc(item.id).collection('notifications').add({
+                    like: false,
+                    comment: false,
+                    friend: true,
+                    item: null,
+                    request: false,
+                    acceptRequest: false,
+                    postId: null,
+                    theme: false,
+                    report: false,
+                    requestUser: userId,
+                    requestNotificationToken: item.notificationToken,
+                    likedBy: [],
+                    timestamp: FieldValue.serverTimestamp()
+                  })).then(() => db.collection('profiles').doc(item.id).collection('checkNotifications').add({
+                    userId: item.id
+                  })).then(async() => await db.collection('profiles').doc(userId).update({
+                    following: FieldValue.arrayUnion(item.id)
+                  }))
+                  res.send({ request: false, friend: true })
+                   // Explicitly return the object
+                  }
+                    
+                    }
+                else if (existingUserFriend.data().actualFriend == false && existingFriend.data().actualFriend == false) {
+                  if (privacy) {
+                    await db.collection('profiles').doc(userId).collection('requests').doc(item.id).set({
+                    id: item.id,
+                    actualRequest: true,
+                    timestamp: FieldValue.serverTimestamp()
+                  }).then(async() => await db.collection('profiles').doc(item.id).collection('requests').doc(userId).set({
+                    id: userId,
+                    actualRequest: false,
+                    timestamp: FieldValue.serverTimestamp()
+                  })).then(() => db.collection('profiles').doc(item.id).collection('notifications').add({
+                    like: false,
+                    comment: false,
+                    friend: true,
+                    item: null,
+                    request: true,
+                    acceptRequest: false,
+                    postId: item.id,
+                    theme: false,
+                    report: false,
+                    requestUser: userId,
+                    requestNotificationToken: item.notificationToken,
+                    likedBy: [],
+                    timestamp: FieldValue.serverTimestamp()
+                  })).then(() => db.collection('profiles').doc(item.id).collection('checkNotifications').add({
+                    userId: item.id
+                  }))
+                  res.send({ request: true, friend: false })
+                  
+                  }
+                  else if (!privacy) {
+                    
+                       await db.collection('profiles').doc(userId).collection('friends').doc(item.id).set({
+                    friendId: newFriend,
+                    actualFriend: true,
+                    previousFriend: true,
+                    timestamp: FieldValue.serverTimestamp(),
+                    lastMessageTimestamp: FieldValue.serverTimestamp()
+                  }).then(async() => await db.collection('profiles').doc(item.id).collection('friends').doc(userId).set({
+                    friendId: newFriend,
+                    actualFriend: false,
+                    previousFriend: true,
+                    timestamp: FieldValue.serverTimestamp(),
+                    lastMessageTimestamp: FieldValue.serverTimestamp()
+                  })).then(async() => await db.collection('profiles').doc(userId).update({
+                    following: FieldValue.arrayUnion(item.id)
+                  })).then(() => db.collection('profiles').doc(item.id).collection('notifications').add({
+                    like: false,
+                    comment: false,
+                    friend: true,
+                    item: null,
+                    request: false,
+                    acceptRequest: false,
+                    postId: item.id,
+                    theme: false,
+                    report: false,
+                    requestUser: userId,
+                    requestNotificationToken: item.notificationToken,
+                    likedBy: [],
+                    timestamp: FieldValue.serverTimestamp()
+                  })).then(() => db.collection('profiles').doc(item.id).collection('checkNotifications').add({
+                    userId: item.id
+                  })).then(async() => await db.collection('usernames').doc(userId).update({
+                    friend: FieldValue.increment(1)
+                  })).then(() => console.log('second'))
+                  res.send({ request: false, friend: true })
+                  
+                  }
+                }
+                  }
+              else {
+                if (privacy) {
+                    await db.collection('profiles').doc(userId).collection('requests').doc(item.id).set({
+                    id: item.id,
+                    actualRequest: true,
+                    timestamp: FieldValue.serverTimestamp()
+                  }).then(async() => await db.collection('profiles').doc(item.id).collection('requests').doc(userId).set({
+                    id: userId,
+                    actualRequest: false,
+                    timestamp: FieldValue.serverTimestamp()
+                  })).then(() => db.collection('profiles').doc(item.id).collection('notifications').add({
+                    like: false,
+                    comment: false,
+                    friend: true,
+                    item: null,
+                    request: true,
+                    acceptRequest: false,
+                    postId: item.id,
+                    theme: false,
+                    report: false,
+                    requestUser: userId,
+                    requestNotificationToken: item.notificationToken,
+                    likedBy: [],
+                    timestamp: FieldValue.serverTimestamp()
+                  })).then(() => db.collection('profiles').doc(item.id).collection('checkNotifications').add({
+                    userId: item.id
+                  }))
+                 res.send({ request: true, friend: false })
+                  }
+                  else if (!privacy) {
+                        await db.collection('profiles').doc(userId).collection('friends').doc(item.id).set({
+                    friendId: newFriend,
+                    actualFriend: true,
+                    previousFriend: false,
+                    timestamp: FieldValue.serverTimestamp(),
+                    lastMessageTimestamp: FieldValue.serverTimestamp()
+                  }).then(async() => await db.collection('profiles').doc(item.id).collection('friends').doc(userId).set({
+                    friendId: newFriend,
+                    actualFriend: false,
+                    previousFriend: true,
+                    timestamp: FieldValue.serverTimestamp(),
+                    lastMessageTimestamp: FieldValue.serverTimestamp()
+                  })).then(async() => await db.collection('profiles').doc(userId).update({
+                    following: FieldValue.arrayUnion(item.id)
+                  })).then(() => db.collection('profiles').doc(item.id).collection('notifications').add({
+                    like: false,
+                    comment: false,
+                    friend: true,
+                    item: null,
+                    request: false,
+                    acceptRequest: false,
+                    postId: item.id,
+                    theme: false,
+                    report: false,
+                    requestUser: userId,
+                    requestNotificationToken: item.notificationToken,
+                    likedBy: [],
+                    timestamp: FieldValue.serverTimestamp()
+                  })).then(() => db.collection('profiles').doc(item.id).collection('checkNotifications').add({
+                    userId: item.id
+                  })).then(async() => await db.collection('usernames').doc(userId).update({
+                    friends: FieldValue.increment(1)
+                  })).then(() => console.log('third'))
+                  res.send({ request: false, friend: true })
+                      }
+              }
+            })
+app.post('/api/deleteRePost', async(req, res) => {
+  //console.log(req, res)
+  const data = req.body
+              const id = data.data.id
+              const userId = data.data.user
+             
+              await db.collection('deletedReposts').doc(id.id).set({
+                info: id,
+                username: id.username,
+                userId: id.userId,
+                timestamp: FieldValue.serverTimestamp()
+              }).then(async() => await db.collection('posts').doc(id.id).delete()).then(async() => 
+                await db.collection('profiles').doc(userId).collection('posts').doc(id.id).delete())
+                res.send({done: true})
+            })
+app.post('/api/removeFriend', async (req, res) => {
+  const data = req.body
+  const friendId = data.data.friendId
+  const userId = data.data.user
+  const newFriend = data.data.newFriend
+  console.log(data)
+  try {
+    const batch = db.batch();
+    const userFriendRef = db.collection('profiles').doc(userId).collection('friends').doc(friendId)
+    const toUserFriendRef = db.collection('profiles').doc(friendId).collection('friends').doc(userId)
+    const friendRef = db.collection('friends').doc(newFriend)
+    const profileRef = db.collection('profiles').doc(userId)
+    const friendProfileRef = db.collection('profiles').doc(friendId)
+    const docSnap = db.collection('friends').doc(newFriend).get();
+    batch.update(userFriendRef, {
+      actualFriend: false,
+      previousFriend: true
+    })
+    batch.update(toUserFriendRef, {
+      searchusername: null,
+      smallKeywords: [],
+      largeKeywords: []
+    })
+    if (docSnap.exists) {
+      batch.update(friendRef, {
+        active: false
+      })
+    }
+    batch.update(profileRef, {
+      following: FieldValue.arrayRemove(friendId)
+    })
+    batch.update(friendProfileRef, {
+      followers: FieldValue.arrayRemove(friendId)
+    })
+    await batch.commit();
+    res.status(200).json({ done: true });
+  }
+  catch (error) {
+    console.error(error);
+    res.status(500).send('Error removing Friend');
+  }
+  
+})
+app.post('/api/deleteTheme', async(req, res) => {
+              const data = req.body
+              const userId = data.data.user
+              const item = data.data.item
+              const background = data.data.background
+              const postBackground = data.data.postBackground
+              const theme = data.data.theme
+              console.log(item)
+              /* const filePath = decodeURIComponent(theme.split('/o/')[1].split('?')[0])
+              await db.collection('profiles').doc(userId).collection('myThemes').doc(item.item.id).delete().then(async() => 
+                await admin.storage().bucket().file(filePath).delete()).then(background == item.item.images[0] 
+                && postBackground == item.item.images[0] ? async() => await db.collection('profiles').doc(userId).update({
+                background: null,
+                postBackground: null
+            
+              }).then(async() => {(await db.collection('posts').where('userId', '==', userId).get()).forEach(async(document) => {
+                  await db.collection('posts').doc(document.id).update({
+                    background: null
+                  })
+                })}) : postBackground == item.item.images[0] ? async() => await db.collection('profiles').doc(userId).update({
+                postBackground: null
+              }).then(async() => {(await db.collection('posts').where('userId', '==', userId).get()).forEach(async(document) => {
+                  await db.collection('posts').doc(document.id).update({
+                    background: null
+                  })
+                })}) : background == item.item.images[0] ? async() => await db.collection('profiles').doc(userId).update({
+                background: null
+              }) : null)
+              if (item.item.forSale) {
+                await db.collection('freeThemes').doc(item.item.id).delete()
+              } */
+              res.send({done: true})
+            })
+
+app.post('/api/likeVideoPost', async(req, res) => {
+  const data = req.body
+  const item = data.data.item
+  const userId = data.data.user
+  await db.collection('videos').doc(item.id).update({
+    likedBy: FieldValue.arrayUnion(userId)
+  }).then(async() => await db.collection('profiles').doc(userId).collection('likes').doc(item.id).set({
+    post: item.id,
+    video: true,
+    timestamp: FieldValue.serverTimestamp()
+  })).then(() => 
+    db.collection('profiles').doc(item.userId).collection('notifications').add({
+            like: true,
+            comment: false,
+            friend: false,
+            item: item.id,
+            video: true,
+            request: false,
+            acceptRequest: false,
+            theme: false,
+            report: false,
+            postId: item.id,
+            requestUser: userId,
+            requestNotificationToken: item.notificationToken,
+            likedBy: [],
+            timestamp: FieldValue.serverTimestamp()
+          }).then(() => db.collection('profiles').doc(item.userId).collection('checkNotifications').add({
+              userId: item.userId
+            })))
+  res.send({done: true})
+})
+app.post('/api/blockUser', async (req, res) => {
+    const data = req.body
+    const name = data.data.name
+    const userId = data.data.user
+    await db.collection('profiles').doc(name).update({
+      usersThatBlocked: FieldValue.arrayUnion(userId)
+    }).then(async() => await db.collection('profiles').doc(userId).update({
+      blockedUsers: FieldValue.arrayUnion(name)
+    })).then(async() => (await db.collection('profiles').doc(userId).collection('posts').get()).forEach(async(e) => {
+      if (e.data().post.length == 1 && e.data().post[0].video) {
+      await db.collection('videos').doc(e.id).update({
+        blockedUsers: FieldValue.arrayUnion(name)
+      })
+      }
+      else {
+      await db.collection('posts').doc(e.id).update({
+        blockedUsers: FieldValue.arrayUnion(name)
+      })
+      }
+      
+    })).then(async() => {
+     const friendSnap = await db.collection('profiles').doc(userId).collection('friends').doc(name).get()
+     if (friendSnap.exists) {
+      db.collection('friends').doc(friendSnap.data().friendId)
+      
+      await db.collection('friends').doc(friendSnap.data().friendId).delete().then(async() => 
+        
+        await db.collection('profiles').doc(userId).collection('friends').doc(name).delete())
+
+      .then(async() => await db.collection('profiles').doc(name).collection('friends').doc(userId).delete())
+     }
+    })
+    res.send({done: true})
+  })
+  app.post('/api/createAccount', async(req, res) => {
+  const data = req.body
+  const userId = data.data.user
+  const firstName = data.data.firstName
+  const lastName = data.data.lastName
+  const userName = data.data.userName
+  const age = data.data.age
+  const pfp = data.data.pfp
+  const token = data.data.token
+  const bio = data.data.bio
+  const smallKeywords = data.data.smallKeywords
+  const largeKeywords = data.data.largeKeywords
+  await db.collection('profiles').doc(userId).set({
+    firstName: firstName.trim(),
+    lastName: lastName.trim(),
+    userName: userName.trim(),
+    active: true,
+    banned: false,
+    credits: 0,
+    age: age,
+    cliqChatActive: null,
+    suspended: false,
+    pfp: pfp,
+    notificationToken: token,
+    bio: bio.trim(),
+    groupsJoined: [],
+    eventsJoined: [],
+    private: false,
+    messageNotifications: [],
+    messageActive: false,
+    allowNotifications: true,
+    stripeAccountID: null,
+    showStatus: true,
+    paymentMethodID: null,
+    paymentMethodLast4: [],
+    blockedUsers: [],
+    background: null, 
+    forSale: false,
+    postBackground: null,
+    reportedMessages: [],
+    adminGroups: [],
+    customerId: null,
+
+    reportedComments: [],
+    reportedPosts: [],
+    reportedThemes: [],
+    timestamp: FieldValue.serverTimestamp(),
+    activeOnMessage: false,
+    usersThatBlocked: [],
+    bannedFrom: [],
+    searchusername: userName.toLowerCase().trim(),
+    smallKeywords: smallKeywords,
+    largeKeywords: largeKeywords,
+    timestamp: FieldValue.serverTimestamp()
+  }).then(async() => await db.collection('usernames').doc(userId).set({
+    username: userName.trim(),
+    firstName: firstName.trim(),
+    lastName: lastName.trim(),
+    friends: 0,
+    pfp: pfp
+  }))
+  res.send({done: true})
+})
+app.post('/api/verifyEmail', async(req, res) => {
+  const receivedData = req.body;
+  twilioClient.verify.v2.services('VA8a978c1104cca22c1e7c00602d9b46a7')
+                .verifications
+                .create({channelConfiguration: {
+                   template_id: 'd-eb19b667f9f2470fa1fc6690c2160bf9',
+                   from: 'dosavaglio741@gmail.com',
+                   from_name: 'NuCliq'
+                 }, to: receivedData.email, channel: 'email'})
+                .then(verification => res.json(verification))
+
+})
+app.post('/api/testLang', async (req, res) => {
+  const receivedData = req.body
+  console.log(langdetect.detect(receivedData.data.value));
+})
+app.post('/api/uploadPost', async(req, res) => {
+  const data = req.body
+  const caption = data.data.caption
+  const newPostArray = data.data.newPostArray
+  const forSale = data.data.forSale
+  const value = data.data.value
+  const finalMentions = data.data.finalMentions
+  const userId = data.data.user
+  const pfp = data.data.pfp
+  const notificationToken = data.data.notificationToken
+  const username = data.data.username
+  const blockedUsers = data.data.blockedUsers
+  const background = data.data.background
+  try {
+    const batch = db.batch();
+  if (newPostArray.length == 1 && newPostArray[0].video) {
+    const docRef = db.collection('videos').doc()
+    const profileRef = db.collection('profiles').doc(userId).collection('posts').doc(docRef.id)
+    batch.set(docRef, {
+      userId: userId,
+      caption: caption,
+      blockedUsers: blockedUsers,
+      reportedIds: [],
+      post: newPostArray.sort((a, b) => a.id - b.id),
+      forSale: forSale,
+      postIndex: 0,
+      private: value,
+      mentions: finalMentions,
+      pfp: pfp,
+      likedBy: [],
+      comments: 0,
+      shares: 0,
+      usersSeen: [],
+      commentsHidden: false,
+      likesHidden: false,
+      archived: false,
+      savedBy: [],
+      multiPost: true,
+      timestamp: FieldValue.serverTimestamp(),
+      notificationToken: notificationToken,
+      username: username,
+      reportVisible: false,
+      background: background
+    })
+    batch.set(profileRef, {
+      userId: userId,
+      caption: caption,
+      post: newPostArray.sort((a, b) => a.id - b.id),
+      forSale: forSale,
+      postIndex: 0,
+      video: true,
+      privacy: value,
+      likedBy: [],
+      repost: false,
+      mentions: finalMentions,
+      comments: 0,
+      shares: 0,
+      usersSeen: [],
+      commentsHidden: false,
+      likesHidden: false,
+      archived: false,
+      savedBy: [],
+      multiPost: true,
+      timestamp: FieldValue.serverTimestamp(),
+      notificationToken: notificationToken,
+      username: username,
+      pfp: pfp,
+      reportVisible: false,
+    })
+    await batch.commit();
+    res.status(200).json({ done: true, docRefId: docRef.id});
+  }
+  else {
+    const docRef = db.collection('posts').doc()
+    const profileRef = db.collection('profiles').doc(userId).collection('posts').doc(docRef.id)
+    batch.set(docRef, {
+      userId: userId,
+      caption: caption,
+      blockedUsers: blockedUsers,
+      post: newPostArray.sort((a, b) => a.id - b.id),
+      forSale: forSale,
+      postIndex: 0,
+      reportedIds: [],
+      private: value,
+      mentions: finalMentions,
+      pfp: pfp,
+      likedBy: [],
+      comments: 0,
+      shares: 0,
+      usersSeen: [],
+      commentsHidden: false,
+      likesHidden: false,
+      archived: false,
+      savedBy: [],
+      multiPost: true,
+      timestamp: FieldValue.serverTimestamp(),
+      notificationToken: notificationToken,
+      username: username,
+      reportVisible: false,
+      background: background
+    })
+    batch.set(profileRef, {
+      userId: userId,
+      caption: caption,
+      post: newPostArray.sort((a, b) => a.id - b.id),
+      forSale: forSale,
+      postIndex: 0,
+      video: false,
+      privacy: value,
+      likedBy: [],
+      mentions: finalMentions,
+      comments: 0,
+      shares: 0,
+      usersSeen: [],
+      commentsHidden: false,
+      likesHidden: false,
+      archived: false,
+      savedBy: [],
+      multiPost: true,
+      timestamp: FieldValue.serverTimestamp(),
+      notificationToken: notificationToken,
+      username: username,
+      pfp: pfp,
+      reportVisible: false,
+      repost: false
+    })
+    await batch.commit();
+    res.status(200).json({ done: true, docRefId: docRef.id});
+  }
+  }
+  catch (error) {
+    console.error(error);
+    res.status(500).send('Error searching Spotify');
+  }
+})
+app.get('/search', async (req, res) => {
+  const query = req.query.q; // Get search query from request
+  const accessToken = await getAccessToken();
+
+  try {
+    const response = await fetch(
+      `https://api.spotify.com/v1/search?q=${query}&type=track`,
+      {
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+        },
+      }
+    );
+    const data = await response.json();
+    res.json(data); // Send search results back to the app
+  } catch (error) {
+    console.error(error);
+    res.status(500).send('Error searching Spotify');
+  }
+});
+
+app.post('/api/receipt', async(req, res) => {
+  const receipt = req.body;
+    try {
+      console.log(receipt.receipt_data)
+      // Primary validation (Production)
+      const response = await fetch('https://buy.itunes.apple.com/verifyReceipt', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          'receipt-data': receipt.receipt_data,
+        }),
+      });
+  
+      const data = await response.json();
+      if (data.status === 0) {
+        // Valid production receipt
+        return data; 
+      } else if (data.status === 21007) {
+        // Sandbox receipt used in production
+        const sandboxResponse = await fetch('https://sandbox.itunes.apple.com/verifyReceipt', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            'receipt-data': receipt.receipt_data,
+          }),
+        });
+  
+        const sandboxData = await sandboxResponse.json();
+        if (sandboxData.status === 0) {
+          // Valid sandbox receipt
+          return sandboxData; 
+        } else {
+          throw new Error('Invalid sandbox receipt');
+        }
+      } else {
+        throw new Error(`Receipt validation failed with status: ${data.status}`);
+      }
+    } catch (error) {
+      throw error; 
+    }  
+})
+app.post('/api/endpoint', async (req, res) => {
+  // Use an existing Customer ID if this is a returning customer.
+  const account = await stripe.accounts.create({
+    type: 'express',
+  });
+    const accountLink = await stripe.accountLinks.create({
+    account: account.id,
+    refresh_url: 'http://10.0.0.225:3000/AddCard',
+    return_url: 'http://10.0.0.225:3000/AddCard',
+    type: 'account_onboarding',
+    });
+    res.send({accountLink: accountLink, accountId: account.id})
+   //console.log(accountLink)
+});
+app.post('/api/videoModeration', async(req, res) => {
+    const receivedData = req.body;
+    sightengine.check(['nudity-2.0,wad,offensive,scam,gore,qr-content']).video_sync(receivedData.video).then(function(result) {
+      // The API response (result)
+      res.json(result)
+    }).catch(function(err) {
+      // Handle erro
+      res.send(err)
+    });
+})
+
+app.post('/api/purchaseEndpoint', async(req, res) => {
+    const receivedData = req.body;
+    //console.log(receivedData)
+    
+    // Use an existing Customer ID if this is a returning customer.
+    
+        //const stripeTaxResponse = await stripe.tax.calculate(taxData);
+        //taxAmount = stripeTaxResponse.amount;
+
+    const customer = await stripe.customers.create();
+    const ephemeralKey = await stripe.ephemeralKeys.create(
+      {customer: customer.id},
+      {apiVersion: '2022-11-15'}
+    );
+    if (receivedData.userId) {
+      const paymentIntent = await stripe.paymentIntents.create({
+        amount: parseInt(receivedData.price),
+        currency: 'usd',
+        receipt_email: receivedData.email,
+        //payment_method_types: ['card'], 
+        customer: customer.id,
+        application_fee_amount: Math.round((parseInt(receivedData.price) * 0.3) + 30),
+        transfer_data: {
+          destination: receivedData.id,
+        },
+       payment_method_types: ['card'],
+       metadata: {
+          product_code: 'txcd_10000000'
+       }
+      });
+      res.json({
+        paymentIntent: paymentIntent.client_secret,
+        paymentIntentId: paymentIntent.id,
+        ephemeralKey: ephemeralKey.secret,
+        customer: customer.id,
+        finalPrice: parseInt(receivedData.price),
+      });
+    }
+    else {
+      const paymentIntent = await stripe.paymentIntents.create({
+        amount: parseInt(receivedData.price),
+        currency: 'usd',
+        receipt_email: receivedData.email,
+        //payment_method_types: ['card'], 
+        customer: customer.id,
+        /* application_fee_amount: Math.round((parseInt(receivedData.price) * 0.3) + 30),
+        transfer_data: {
+          destination: receivedData.id,
+        }, */
+       payment_method_types: ['card'],
+       metadata: {
+          product_code: 'txcd_10000000'
+       }
+      });
+      res.json({
+        paymentIntent: paymentIntent.client_secret,
+        paymentIntentId: paymentIntent.id,
+        ephemeralKey: ephemeralKey.secret,
+        customer: customer.id,
+        finalPrice: parseInt(receivedData.price),
+      });
+    }
+    
+  })
+app.post('/api/savedCardEndpoint', async (req, res) => {
+    const receivedData = req.body;
+    let email = receivedData.email
+
+    try {
+      if (receivedData.cvcToken && email) {
+
+        const params = {
+          amount: parseInt(receivedData.price),
+          confirm: true,
+          confirmation_method: 'manual',
+          currency: 'usd',
+          payment_method: receivedData.paymentMethodID,
+          payment_method_options: {
+            card: {
+              cvc_token: receivedData.cvcToken,
+            },
+          },
+          //use_stripe_sdk: useStripeSdk,
+          customer: receivedData.customer,
+          //return_url: 'stripe-example://stripe-redirect',
+        };
+        const intent = await stripe.paymentIntents.create(params);
+          res.json({
+            //paymentIntent: paymentIntent.client_secret,
+            paymentIntentId: intent.id,
+            //ephemeralKey: ephemeralKey.secret,
+            customer: intent.customer,
+          });
+          console.log(`intent: ${intent}`)
+      }
+      //return res.sendStatus(400);
+    } catch (e) {
+      // Handle "hard declines" e.g. insufficient funds, expired card, etc
+      return res.send({ error: e.message });
+    }
+  }
+);
+app.post('/api/productEndpoint', async(req, res) => {
+    const receivedData = req.body;
+    console.log(receivedData)
+    const product = await stripe.products.create({
+    name: receivedData.name,
+    default_price_data: {
+        unit_amount: receivedData.price,
+        currency: 'usd',
+        
+    },
+    images: receivedData.post,
+    expand: ['default_price'],
+    metadata: {
+      nameInsensitive: receivedData.name.toUpperCase(),
+      keywords: receivedData.keywords,
+      timestamp: receivedData.timestamp,
+      price: receivedData.price,
+      bought_count: 0
+    },
+    
+    })
+    console.log(product)
+})
+
+app.post('/api/retrieveEndpoint', async(req, res) => {
+    const receivedData = req.body;
+    //console.log(receivedData)
+      const paymentIntent = await stripe.paymentIntents.retrieve(
+        receivedData.id
+  );
+    if (paymentIntent.payment_method_options.card.setup_future_usage != undefined) {
+      const paymentMethod = await stripe.paymentMethods.retrieve(
+        paymentIntent.payment_method
+        
+      )
+      console.log(`Payment Method: ${paymentMethod}`)
+      res.json({
+        futureUsage: paymentIntent.payment_method_options.card.setup_future_usage, chargeId: paymentIntent.latest_charge, paymentMethodID: paymentIntent.payment_method, lastFour: paymentMethod.card.last4
+      })
+      /*  */
+    }
+    else {
+      res.json({futureUsage: null, chargeId: paymentIntent.latest_charge})
+    }
+      
+})
+
+app.post('/api/refund', async(req, res) => {
+  const receivedData = req.body;
+  const refund = await stripe.refunds.create({
+      charge: receivedData.chargeId,
+      refund_application_fee: true,
+      reverse_transfer: true
+    }, {
+      stripeAccount: receivedData.stripeAccount,
+    });
+})
+
+app.post('/api/chargeEndpoint', async(req, res) => {
+  const receivedData = req.body;
+  //console.log(receivedData)
+  const paymentIntent = await stripe.paymentIntents.capture(
+    receivedData.pi
+  );
+  res.json({paymentIntent: paymentIntent})
+})
+app.post('/api/username', async(req, res) => {
+    const receivedData = req.body
+    data = new FormData();
+    data.append('text', receivedData.username);
+    data.append('lang', 'en');
+    data.append('mode', 'username');
+    data.append('api_user', process.env.MODERATION_API_USER);
+    data.append('api_secret', process.env.MODERATION_API_SECRET);
+    console.log(data)
+    axios({
+    url: 'https://api.sightengine.com/1.0/text/check.json',
+    method:'post',
+    data: data,
+    headers: data.getHeaders()
+    })
+    .then(function (response) {
+    // on success: handle response
+    res.send(response.data)
+    console.log(response.data);
+    })
+    .catch(function (error) {
+    // handle error
+    if (error.response) console.log(error.response.data);
+    else console.log(error.message);
+    });
+    })
+app.post('/api/text', (req, res) => {
+    const receivedData = req.body
+    console.log(receivedData)
+    data = new FormData();
+    data.append('text', receivedData.text);
+    data.append('lang', 'en');
+    data.append('mode', 'standard');
+    data.append('api_user', process.env.MODERATION_API_USER);
+    data.append('api_secret', process.env.MODERATION_API_SECRET);
+
+    axios({
+    url: 'https://api.sightengine.com/1.0/text/check.json',
+    method:'post',
+    data: data,
+    headers: data.getHeaders()
+    })
+    .then(function (response) {
+    // on success: handle response
+    console.log(response.data);
+    })
+    .catch(function (error) {
+    // handle error
+    if (error.response) console.log(error.response.data);
+    else console.log(error.message);
+    });
+    })
+    
+app.post('/api/textNotification', (req, res) => {
+  const receivedData = req.body
+  //console.log(receivedData)
+  // Each push token looks like ExponentPushToken[xxxxxxxxxxxxxxxxxxxxxx]
+
+  // Check that all your push tokens appear to be valid Expo push tokens
+
+  // Construct a message (see https://docs.expo.io/push-notifications/sending-notifications/)
+  res.send(receivedData)
+  let messages = [];
+  messages.push({
+    to: receivedData.pushToken,
+    sound: 'default',
+    title: `${receivedData.firstName} ${receivedData.lastName}`,
+    body: `${receivedData.message.text}`
+  })
+  let chunks = expo.chunkPushNotifications(messages);
+    let tickets = [];
+    (async () => {
+  // Send the chunks to the Expo push notification service. There are
+  // different strategies you could use. A simple one is to send one chunk at a
+  // time, which nicely spreads the load out over time:
+  for (let chunk of chunks) {
+    try {
+      let ticketChunk = await expo.sendPushNotificationsAsync(chunk);
+      console.log(ticketChunk);
+      tickets.push(...ticketChunk);
+      // NOTE: If a ticket contains an error code in ticket.details.error, you
+      // must handle it appropriately. The error codes are listed in the Expo
+      // documentation:
+      // https://docs.expo.io/push-notifications/sending-notifications/#individual-errors
+    } catch (error) {
+      console.error(error);
+    }
+  }
+})();
+messages = [];
+chunks = [];
+tickets = [];
+})
+app.post('/api/imageNotification', (req, res) => {
+  const receivedData = req.body
+  // Each push token looks like ExponentPushToken[xxxxxxxxxxxxxxxxxxxxxx]
+
+  // Check that all your push tokens appear to be valid Expo push tokens
+
+  // Construct a message (see https://docs.expo.io/push-notifications/sending-notifications/)
+  messages.push({
+    to: receivedData.pushToken,
+    sound: 'default',
+    title: `${receivedData.firstName} ${receivedData.lastName}`,
+    body: 'Sent a Photo'
+  })
+})
+app.post('/api/postNotification', (req, res) => {
+  const receivedData = req.body
+  // Each push token looks like ExponentPushToken[xxxxxxxxxxxxxxxxxxxxxx]
+
+  // Check that all your push tokens appear to be valid Expo push tokens
+
+  // Construct a message (see https://docs.expo.io/push-notifications/sending-notifications/)
+  messages.push({
+    to: receivedData.pushToken,
+    sound: 'default',
+    title: `${receivedData.firstName} ${receivedData.lastName}`,
+    body: `Sent a Post by ${receivedData.username}`
+  })
+})
+app.post('/api/likePost', async(req, res) => {
+  console.log(req.body)
+  const data = req.body
+  const item = data.data.item
+  const userId = data.data.user
+  try {
+    const batch = db.batch();
+    const postRef = db.collection('posts').doc(item.id)
+    const likesRef = db.collection('profiles').doc(userId).collection('likes').doc(item.id)
+    const profileRef = db.collection('profiles').doc(item.userId).collection('notifications').doc()
+    const profileCheckRef = db.collection('profiles').doc(item.userId).collection('checkNotifications').doc()
+    batch.update(postRef, {
+      likedBy: FieldValue.arrayUnion(userId)
+    })
+    batch.set(likesRef, {
+      post: item.id,
+      timestamp: FieldValue.serverTimestamp()
+    })
+    batch.set(profileRef, {
+      like: true,
+      comment: false,
+      friend: false,
+      item: item.id,
+      request: false,
+      acceptRequest: false,
+      theme: false,
+      report: false,
+      postId: item.id,
+      requestUser: userId,
+      requestNotificationToken: item.notificationToken,
+      likedBy: [],
+      timestamp: FieldValue.serverTimestamp()
+    })
+    batch.set(profileCheckRef, {
+      userId: item.userId
+    })
+    await batch.commit();
+    res.status(200).json({ done: true });
+  }
+  catch (error) {
+    console.error('Error adding like', error);
+    res.status(500).json({ error: 'Failed to add like.' });
+    }
+})
+app.post('/api/likeNotification', (req, res) => {
+  const receivedData = req.body
+  let messages = []
+  messages.push({
+    to: receivedData.pushToken,
+    sound: 'default',
+    body: `${receivedData.username} Liked Your Post`,
+    data: receivedData.data
+  })
+  let chunks = expo.chunkPushNotifications(messages);
+    let tickets = [];
+    (async () => {
+  for (let chunk of chunks) {
+    try {
+      let ticketChunk = await expo.sendPushNotificationsAsync(chunk);
+      console.log(ticketChunk);
+      tickets.push(...ticketChunk);
+    } catch (error) {
+      console.error(error);
+    }
+  }
+})();
+messages = [];
+chunks = [];
+tickets = [];
+})
+app.post('/api/likeCommentNotification', (req, res) => {
+  const receivedData = req.body
+  // Each push token looks like ExponentPushToken[xxxxxxxxxxxxxxxxxxxxxx]
+
+  // Check that all your push tokens appear to be valid Expo push tokens
+
+  // Construct a message (see https://docs.expo.io/push-notifications/sending-notifications/)
+  messages.push({
+    to: receivedData.pushToken,
+    sound: 'default',
+    title: `${receivedData.username} Liked Your Comment:`,
+    body: `${receivedData.comment}`
+  })
+})
+app.post('/api/likePostNotification', (req, res) => {
+  const receivedData = req.body
+  // Each push token looks like ExponentPushToken[xxxxxxxxxxxxxxxxxxxxxx]
+
+  // Check that all your push tokens appear to be valid Expo push tokens
+
+  // Construct a message (see https://docs.expo.io/push-notifications/sending-notifications/)
+  messages.push({
+    to: receivedData.pushToken,
+    sound: 'default',
+    title: `${receivedData.firstName} ${receivedData.lastName}`,
+    body: `Liked a Message You Shared`
+  })
+})
+app.post('/api/replyNotification', (req, res) => {
+  const receivedData = req.body
+  // Each push token looks like ExponentPushToken[xxxxxxxxxxxxxxxxxxxxxx]
+
+  // Check that all your push tokens appear to be valid Expo push tokens
+
+  // Construct a message (see https://docs.expo.io/push-notifications/sending-notifications/)
+  messages.push({
+    to: receivedData.pushToken,
+    sound: 'default',
+    title: `${receivedData.username} Replied to Your Comment:`,
+    body: `${receivedData.comment}`
+  })
+})
+app.post('/api/friendNotification', (req, res) => {
+  const receivedData = req.body
+  // Each push token looks like ExponentPushToken[xxxxxxxxxxxxxxxxxxxxxx]
+
+  // Check that all your push tokens appear to be valid Expo push tokens
+
+  // Construct a message (see https://docs.expo.io/push-notifications/sending-notifications/)
+  messages.push({
+    to: receivedData.pushToken,
+    sound: 'default',
+    title: `New Friend`,
+    body: `${receivedData.username} Added You as a Friend`
+  })
+})
+app.listen(4000, () => {
+  console.log('Server is running on port 4000');
+});
+/* const express = require('express');
+
+const bodyParser = require('body-parser');
+const app = express();
+app.use(cors());
+app.use(bodyParser.json());
+
+// Define a sample API endpoint
+app.get('/api/data', (req, res) => {
+  const receivedData = req.body;
+  // Handle the received data
+  console.log(receivedData);
+  res.json({ message: 'Data received successfully' });
+});
+
+// Start the server
+const port = 3000;
+app.listen(port, () => {
+  console.log(`Server is running on port ${port}`);
+});
+
+const express = require('express');
+const bodyParser = require('body-parser');
+const axios = require('axios')
+const FormData = require('form-data');
+const fs = require('fs');
+const app = express();
+
+// Parse JSON request bodies
+app.use(bodyParser.json());
+
+// Define an endpoint to handle the incoming data
+app.post('/api/endpoint', (req, res) => {
+  const receivedData = req.body;
+  // Handle the received data
+  //console.log(receivedData);
+  data = new FormData();
+    data.append('media', fs.createReadStream(receivedData.uri));
+    data.append('models', 'nudity-2.0,wad,offensive,scam,gore,qr-content');
+    data.append('api_user', process.env.MODERATION_API_USER);
+    data.append('api_secret', process.env.MODERATION_API_SECRET);
+    axios({
+        method: 'post',
+        url:'https://api.sightengine.com/1.0/check.json',
+        data: data,
+        headers: data.getHeaders()
+        })
+        .then(function (response) {
+        // on success: handle response
+        console.log(response.data);
+        })
+        .catch(function (error) {
+        // handle error
+        if (error.response) console.log(error.response.data);
+        else console.log(error.message);
+        });
+    res.json({ message: 'Data received successfully' });
+});
+
+
+// Start the server
+
+ */
