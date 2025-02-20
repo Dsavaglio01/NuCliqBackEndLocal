@@ -269,6 +269,184 @@ async function addCommentUsername(data, collectionType) {
         return { error: 'Failed to add reply to comment.' };
     }
 }
+async function addReplyToReplyUsername(data, collectionType) {
+    const { focusedPost, newComment, tempCommentId, textModerationURL, newReply } = data.data;
+    const formData = new FormData();
+    formData.append('text', newComment);
+    formData.append('lang', 'en');
+    formData.append('mode', 'standard');
+    formData.append('api_user', MODERATION_API_USER);
+    formData.append('api_secret', MODERATION_API_SECRET);
+    const moderationResult = await moderateText(newComment, textModerationURL);
+    if (moderationResult.link || moderationResult.profanity) return moderationResult;
+    if (moderationResult.error) return moderationResult;
+    try {
+        const batch = db.batch();
+        const commentDocRef = db.collection(collectionType).doc(focusedPost.id).collection('comments').doc(tempCommentId);
+        // Reference to the video document
+        const postDocRef = db.collection(collectionType).doc(focusedPost.id);
+        batch.update(commentDocRef, {
+            replies: FieldValue.arrayUnion(newReply),
+        });
+        batch.update(postDocRef, {
+            comments: FieldValue.increment(1),
+        });
+        await batch.commit();
+        return { done: true };
+    } catch (error) {
+        console.error(error);
+        return { error: 'Failed to add reply to comment.' };
+    }
+}
+async function addReplyToReply(data, collectionType) {
+    const { focusedPost, newComment, tempCommentId, commentSnap, textModerationURL, reply, newReply, userId, username } = data.data;
+    const formData = new FormData();
+    formData.append('text', newComment);
+    formData.append('lang', 'en');
+    formData.append('mode', 'standard');
+    formData.append('api_user', MODERATION_API_USER);
+    formData.append('api_secret', MODERATION_API_SECRET);
+    const moderationResult = await moderateText(newComment, textModerationURL);
+    if (moderationResult.link || moderationResult.profanity) return moderationResult;
+    if (moderationResult.error) return moderationResult;
+    try {
+        const batch = db.batch();
+        const commentDocRef = db.collection(collectionType).doc(focusedPost.id).collection('comments').doc(tempCommentId)
+        const postRef = db.collection(collectionType).doc(focusedPost.id)
+        const profileRef = db.collection('profiles').doc(commentSnap.user).collection('notifications').doc()
+        const profileCheckRef = db.collection('profiles').doc(commentSnap.user).collection('checkNotifications').doc()
+        batch.update(commentDocRef, {
+            replies: FieldValue.arrayUnion(newReply),
+        });
+        batch.update(postRef, {
+            comments: FieldValue.increment(1),
+        });
+        batch.set(profileRef, {
+            like: false,
+            reply: true,
+            friend: false,
+            item: reply,
+            request: false,
+            acceptRequest: false,
+            postId: focusedPost.id, 
+            theme: false,
+            report: false,
+            requestUser: userId,
+            requestNotificationToken: focusedPost.notificationToken,
+            likedBy: username,
+            timestamp: FieldValue.serverTimestamp()
+        })
+        batch.set(profileCheckRef, {
+            userId: userId
+        })
+        await batch.commit();
+        return { done: true };
+    } catch (error) {
+        console.error(error);
+        return { error: 'Failed to add reply to comment.' };
+    }
+}
+const deleteMessageHelper = async (itemId, itemUser, itemToUser, image = null, friendId, newMessageId = null, newMessageTimestamp = null) => {
+  const batch = db.batch();
+  const deletedMessageRef = db.collection('deletedMessages').doc(itemId);
+  const friendChatRef = db.collection('friends').doc(friendId).collection('chats').doc(itemId);
+  const friendRef = db.collection('friends').doc(friendId);
+  batch.set(deletedMessageRef, {
+    user: itemUser,
+    toUser: itemToUser,
+    timestamp: FieldValue.serverTimestamp()
+  });
+
+  // Delete the message from the friend's chat
+  batch.delete(friendChatRef);
+
+  // Update the friend record with the new message or null if no new message
+  const updateData = newMessageId ? {
+    messageId: newMessageId,
+    lastMessageTimestamp: newMessageTimestamp,
+    lastMessage: { text: 'User deleted message' }
+  } : {
+    messageId: null,
+    lastMessageTimestamp: FieldValue.serverTimestamp(),
+    lastMessage: null,
+    toUser: null
+  };
+  batch.update(friendRef, updateData);
+
+  await batch.commit();
+  
+  // Handle the file deletion
+  if (image) {
+    const filePath = decodeURIComponent(image.split('/o/')[1].split('?')[0]);
+    await admin.storage().bucket().file(filePath).delete();
+  }
+  
+};
+const updateProfile = (post, profile, userId, url, themeName, price, sellChecked) => {
+  const profileRef = db.collection('profiles').doc(userId);
+
+  // Define the fields to update
+  const updateFields = {
+    themeName: themeName.trim(),
+    free: Number.parseFloat(price) > 0 ? false : true,
+    forSale: sellChecked ? true : false,
+    postBought: sellChecked ? true : false,
+    credits: FieldValue.increment(-1)
+  };
+
+  // Add specific fields depending on post/profile condition
+  if (post) {
+    updateFields.postBackground = url;
+  }
+
+  if (profile) {
+    updateFields.background = url;
+  }
+  if (!post && !profile) {
+    profileRef.update({credits: FieldValue.increment(-1)})
+  }
+  // Perform update on the profile document and return the update operation
+  return profileRef.update(updateFields);
+};
+
+
+async function createTheme(user, themeName, price, sellChecked, url, keywords, originalKeywords) {
+  const myRef = db.collection('profiles').doc(user).collection('myThemes').doc();
+  return {
+    set: myRef.set({
+      timestamp: FieldValue.serverTimestamp(),
+      images: FieldValue.arrayUnion(url),
+      active: true,
+      name: themeName.trim(),
+      keywords: originalKeywords,
+      searchKeywords: keywords,
+      bought: false,
+      forSale: sellChecked ? true : false,
+      price: Number.parseFloat(price),
+    }),
+    ref: myRef
+  };
+}
+
+const createFreeTheme = async(themeRef, userId, themeName, originalKeywords, keywords, sellChecked) => {
+  const freeRef = db.collection('freeThemes').doc(themeRef.id);
+  return {
+    free: freeRef.set({
+      timestamp: FieldValue.serverTimestamp(),
+      images: FieldValue.arrayUnion(themeRef.id),
+      active: true,
+      userId: userId,
+      name: themeName.trim(),
+      keywords: originalKeywords,
+      searchKeywords: keywords,
+      bought: false,
+      forSale: sellChecked ? true : false,
+      bought_count: 0,
+      stripe_metadata_price: 0
+    })
+  };
+};
+
 app.post('/api/newReplyVideoUsername', async (req, res) => {
     const result = await addReplyUsername(req.body, 'videos');
     res.status(result.done ? 200 : 500).json(result);
@@ -301,64 +479,38 @@ app.post('/api/newCommentUsername', async(req, res) => {
     const result = await addCommentUsername(req.body, 'posts');
     res.status(result.done ? 200 : 500).json(result);
 })
+app.post('/api/newReplyToReplyVideoUsername', async(req, res) => {
+    const result = await addReplyToReplyUsername(req.body, 'videos');
+    res.status(result.done ? 200 : 500).json(result);
+})
+app.post('/api/newReplyToReplyUsername', async(req, res) => {
+    const result = await addReplyToReplyUsername(req.body, 'posts');
+    res.status(result.done ? 200 : 500).json(result);
+})
+app.post('/api/newReplyToReplyVideo', async(req, res) => {
+    const result = await addReplyToReply(req.body, 'videos');
+    res.status(result.done ? 200 : 500).json(result);
+})
+app.post('/api/newReplyToReply', async(req, res) => {
+    const result = await addReplyToReply(req.body, 'posts');
+    res.status(result.done ? 200 : 500).json(result);
+})
 app.post('/api/deleteImageMessage', async (req, res) => {
-    const data = req.body
-    const item = data.data.item
-    const friendId = data.data.friendId
-    const image = data.data.image
-    try {
-      const batch = db.batch();
-      const deletedMessageRef = db.collection('deletedMessages').doc(item.id)
-      const friendRef = db.collection('friends').doc(friendId)
-      const friendChatRef = db.collection('friends').doc(friendId).collection('chats').doc(item.id)
-      batch.set(deletedMessageRef, {
-        user: item.user,
-        toUser: item.toUser,
-        timestamp: FieldValue.serverTimestamp()
-      })
-      batch.update(friendRef, {
-        messageId: null,
-        lastMessageTimestamp: FieldValue.serverTimestamp(),
-        lastMessage: null,
-        toUser: null
-      })
-      batch.delete(friendChatRef)
-      await batch.commit();
-      const filePath = decodeURIComponent(image.split('/o/')[1].split('?')[0])
-      await admin.storage().bucket().file(filePath).delete()
-      res.status(200).json({ done: true });
-    }
-    catch (error) {
-      console.error(error)
-      res.status(500).json({ error: 'Failed to delete message.' });
-    }
-  })
+  const data = req.body;
+  const { item, image, friendId } = data.data;
+  try {
+    await deleteMessageHelper(item.id, item.user, item.toUser, image, friendId);
+    res.status(200).json({ done: true });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: 'Failed to delete message.' });
+  }
+})
 app.post('/api/deleteImageMessageNewMessage', async (req, res) => {
     const data = req.body
-    const item = data.data.item
-    const image = data.data.image
-    const friendId = data.data.friendId
-    const newMessageId = data.data.newMessageId
-    const newMessageTimestamp = data.data.newMessageTimestamp
+    const { item, image, friendId, newMessageId, newMessageTimestamp } = data.data;
     try {
-      const batch = db.batch();
-      const deletedMessageRef = db.collection('deletedMessages').doc(item.id)
-      const friendChatRef = db.collection('friends').doc(friendId).collection('chats').doc(item.id)
-      const friendRef = db.collection('friends').doc(friendId)
-      batch.set(deletedMessageRef, {
-        user: item.user,
-        toUser: item.toUser,
-        timestamp: FieldValue.serverTimestamp()
-      })
-      batch.delete(friendChatRef)
-      batch.update(friendRef, {
-        messageId: newMessageId,
-        lastMessageTimestamp: newMessageTimestamp,
-        lastMessage: {text: 'User deleted message'}
-      })
-      await batch.commit();
-      const filePath = decodeURIComponent(image.split('/o/')[1].split('?')[0])
-      await admin.storage().bucket().file(filePath).delete()
+      await deleteMessageHelper(item.id, item.user, item.toUser, image, friendId, newMessageId, newMessageTimestamp);
       res.status(200).json({ done: true });
     }
     catch (error) {
@@ -368,41 +520,27 @@ app.post('/api/deleteImageMessageNewMessage', async (req, res) => {
   })
 app.post('/api/deleteMessageNewMessage', async (req, res) => {
     const data = req.body
-    const itemUser = data.data.itemUser
-    const itemToUser = data.data.itemToUser
-    const itemId = data.data.itemId
-    const friendId = data.data.friendId
-    const newMessageId = data.data.newMessageId
-    const newMessageTimestamp = data.data.newMessageTimestamp
-    await db.collection('deletedMessages').doc(itemId).set({
-      user: itemUser,
-      toUser: itemToUser,
-      timestamp: FieldValue.serverTimestamp()
-    }).then(async() => await db.collection('friends').doc(friendId).collection('chats').doc(itemId).delete())
-    .then(async() => await db.collection('friends').doc(friendId).update({
-      messageId: newMessageId,
-      lastMessageTimestamp: newMessageTimestamp,
-      lastMessage: {text: 'User deleted message'}
-    }))
-    res.send({done: true})
+    const { itemId, itemToUser, itemUser, friendId, newMessageId, newMessageTimestamp } = data.data;
+    try {
+      await deleteMessageHelper(itemId, itemUser, itemToUser, null, friendId, newMessageId, newMessageTimestamp);
+      res.status(200).json({ done: true });
+    }
+    catch (error) {
+      console.error(error)
+      res.status(500).json({ error: 'Failed to delete message.' });
+    }
   })
 app.post('/api/deleteMessage', async (req, res) => {
     const data = req.body
-    const itemUser = data.data.itemUser
-    const itemToUser = data.data.itemToUser
-    const itemId = data.data.itemId
-    const friendId = data.data.friendId
-    await db.collection('deletedMessages').doc(itemId).set({
-      user: itemUser,
-      toUser: itemToUser,
-      timestamp: FieldValue.serverTimestamp()
-    }).then(async() => await db.collection('friends').doc(friendId).update({
-      messageId: null,
-      lastMessageTimestamp: FieldValue.serverTimestamp(),
-      lastMessage: null,
-      toUser: null
-    })).then(async() => await db.collection('friends').doc(friendId).collection('chats').doc(itemId).delete())
-    res.send({done: true})
+    const { itemId, itemToUser, itemUser, friendId} = data.data;
+    try {
+      await deleteMessageHelper(itemId, itemUser, itemToUser, null, friendId);
+      res.status(200).json({ done: true });
+    }
+    catch (error) {
+      console.error(error)
+      res.status(500).json({ error: 'Failed to delete message.' });
+    }
   })
 app.post('/api/deletePost', async (req, res) => {
     const data = req.body;
@@ -575,219 +713,78 @@ app.post('/api/uploadStory', async(req, res) => {
     res.status(500).json({ error: 'Failed to add reply to comment.' });
   }
 })
-  app.post('/api/profilepostnotsell', async (req, res) => {
-      const data = req.body
-      const userId = data.data.user
-      const url = data.data.url
-      const sellChecked = data.data.sellChecked
-      const themeName = data.data.themeName
-      const price = data.data.price
-      const keywords = data.data.keywords
-      const originalKeywords = data.data.originalKeywords
-      try {
-        const batch = db.batch();
-        const profileRef = db.collection('profiles').doc(userId)
-        const myRef = db.collection('profiles').doc(userId).collection('myThemes').doc()
-        batch.update(profileRef, {
-          background: url,
-          postBackground: url,
-          themeName: themeName.trim(),
-          free: Number.parseFloat(price) > 0 ? false : true,
-          forSale: sellChecked ? true: false,
-          postBought: sellChecked ? true: false,
-          credits: FieldValue.increment(-1)
-        })
-        batch.set(myRef, {
-          timestamp: FieldValue.serverTimestamp(),
-          images: FieldValue.arrayUnion(url),
-          active: true,
-          name: themeName.trim(),
-          keywords: originalKeywords,
-          searchKeywords: keywords,
-          bought: false,
-          forSale: sellChecked ? true: false,
-          price: Number.parseFloat(price),
-        })
-        await batch.commit();
-        res.status(200).json({ done: true });
-      } 
-      catch (error) {
-        console.error("Error processing request: ", error);
-        res.status(500).send("Error processing request"); 
-      }
-    })
-    app.post('/api/postnotprofilenotsell', async (req, res) => {
-      const data = req.body
-      const userId = data.data.user
-      const url = data.data.url
-      const sellChecked = data.data.sellChecked
-      const themeName = data.data.themeName
-      const price = data.data.price
-      const keywords = data.data.keywords
-      const originalKeywords = data.data.originalKeywords
-      try {
-        const batch = db.batch();
-        const myRef = db.collection('profiles').doc(userId).collection('myThemes').doc()
-        const profileRef = db.collection('profiles').doc(userId)
-        batch.set(myRef, {
-          timestamp: FieldValue.serverTimestamp(),
-          images: FieldValue.arrayUnion(url),
-          active: true,
-          name: themeName.trim(),
-          keywords: originalKeywords,
-          searchKeywords: keywords,
-          bought: false,
-          price: Number.parseFloat(price),
-          forSale: sellChecked ? true: false,
-        })
-        batch.update(profileRef, {
-          postBackground: url,
-          free: Number.parseFloat(price) > 0 ? false : true,
-          themeName: themeName.trim(),
-          credits: FieldValue.increment(-1),
-          postBought: sellChecked ? true: false
-        })
-        await batch.commit();
-        res.status(200).json({ done: true });
-      }
-      catch (error){
-        console.error(error);
-        res.status(500).send("Error")
-      }
-    })
-    app.post('/api/sellpostnotprofile', async (req, res) => {
-      const data = req.body
-      const userId = data.data.user
-      const url = data.data.url
-      const sellChecked = data.data.sellChecked
-      const themeName = data.data.themeName
-      const price = data.data.price
-      const keywords = data.data.keywords
-      const originalKeywords = data.data.originalKeywords
-      try {
-        const batch = db.batch();
-        const profileRef = db.collection('profiles').doc(userId)
-        const docRef = db.collection('profiles').doc(userId).collection('myThemes').doc()
-        const freeRef = db.collection('freeThemes').doc(docRef.id)
-        batch.update(profileRef, {
-          postBackground: url,
-          postBought: sellChecked ? true: false,
-          credits: FieldValue.increment(-1)
-        })
-        batch.set(docRef, {
-          timestamp: FieldValue.serverTimestamp(),
-          images: FieldValue.arrayUnion(url),
-          keywords: originalKeywords,
-          searchKeywords: keywords,
-          active: true,
-          name: themeName.trim(),
-          bought: false,
-          price: Number.parseFloat(price),
-          forSale: sellChecked ? true: false,
-        })
-        batch.set(freeRef, {
-          timestamp: FieldValue.serverTimestamp(),
-          images: FieldValue.arrayUnion(url),
-          active: true,
-          userId: userId,
-          name: themeName.trim(),
-          keywords: originalKeywords,
-          searchKeywords: keywords,
-          bought: false,
-          forSale: sellChecked ? true: false,
-          bought_count: 0,
-          stripe_metadata_price: 0
-        })
-        await batch.commit();
-        res.status(200).json({ done: true });
-      }
-      catch (error) {
-        console.error(error)
-        res.status(500).send("Error")
-      }
-    })
-    app.post('/api/sellprofilenotpost', async (req, res) => {
-      const data = req.body
-      const userId = data.data.user
-      const url = data.data.url
-      const sellChecked = data.data.sellChecked
-      const themeName = data.data.themeName
-      const price = data.data.price
-      const keywords = data.data.keywords
-      const originalKeywords = data.data.originalKeywords
-      try {
-        const batch = db.batch();
-        const profileRef = db.collection('profiles').doc(userId)
-        const docRef = db.collection('profiles').doc(userId).collection('myThemes').doc();
-        const freeRef = db.collection('freeThemes').doc(docRef.id)
-        batch.update(profileRef, {
-          background: url,
-          free: Number.parseFloat(price) > 0 ? false : true,
-          forSale: sellChecked ? true: false,
-          credits: FieldValue.increment(-1)
-        })
-        batch.set(docRef, {
-          timestamp: FieldValue.serverTimestamp(),
-          images: FieldValue.arrayUnion(url),
-          active: true,
-          name: themeName.trim(),
-          keywords: originalKeywords,
-          searchKeywords: keywords,
-          bought: false,
-          price: Number.parseFloat(price),
-          forSale: sellChecked ? true: false,
-        })
-        batch.set(freeRef, {
-          timestamp: FieldValue.serverTimestamp(),
-          images: FieldValue.arrayUnion(url),
-          active: true,
-          name: themeName.trim(),
-          keywords: originalKeywords,
-          searchKeywords: keywords,
-          bought: false,
-          forSale: sellChecked ? true: false,
-          bought_count: 0,
-          userId: userId,
-          stripe_metadata_price: 0
-        })
-        await batch.commit();
-        res.status(200).json({ done: true });
-    }
-    catch (error) {
-      console.error(error)
-      res.status(500).send("Error")
-    }
-    })
+app.post('/api/profilepostnotsell', async (req, res) => {
+  const data = req.body;
+  const { user, url, sellChecked, themeName, price, keywords, originalKeywords } = data.data;
+  try {
+    const batch = db.batch();
+    batch.update(await updateProfile(true, true, user, url, themeName, price, sellChecked));
+    const themeCreation = await createTheme(user, themeName, price, sellChecked, url, keywords, originalKeywords)
+    batch.set(themeCreation.set)
+    batch.commit();
+    res.status(200).json({ done: true });
+  } catch (error) {
+    console.error("Error processing request: ", error);
+    res.status(500).send("Error processing request");
+  }
+});
+app.post('/api/postnotprofilenotsell', async (req, res) => {
+  const data = req.body;
+  const { user, url, sellChecked, themeName, price, keywords, originalKeywords } = data.data;
+  try {
+    const batch = db.batch();
+    const themeCreation = await createTheme(user, themeName, price, sellChecked, url, keywords, originalKeywords)
+    batch.set(themeCreation.set)
+    batch.update(await updateProfile(true, false, user, url, themeName, price, sellChecked));
+    batch.commit();
+    res.status(200).json({ done: true });
+  } catch (error) {
+    console.error("Error processing request: ", error);
+    res.status(500).send("Error processing request");
+  }
+});
+app.post('/api/sellpostnotprofile', async (req, res) => {
+  const data = req.body;
+  const { user, url, sellChecked, themeName, price, keywords, originalKeywords } = data.data;
+  try {
+    const batch = db.batch();
+    batch.update(await updateProfile(true, false, user, url, themeName, price, sellChecked))
+    const themeCreation = await createTheme(user, themeName, price, sellChecked, url, keywords, originalKeywords);
+    batch.set(themeCreation.set)
+    const freeCreation = await createFreeTheme(themeCreation.ref, user, themeName, originalKeywords, keywords, sellChecked);
+    batch.set(freeCreation.free)
+    batch.commit();
+    res.status(200).json({ done: true });
+  } catch (error) {
+    console.error("Error processing request: ", error);
+    res.status(500).send("Error processing request");
+  }
+});
+  app.post('/api/sellprofilenotpost', async (req, res) => {
+  const data = req.body;
+  const { user, url, sellChecked, themeName, price, keywords, originalKeywords } = data.data;
+  try {
+    const batch = db.batch();
+    batch.update(await updateProfile(false, true, user, url, themeName, price, sellChecked))
+    const themeRef = await createTheme(user, themeName, price, sellChecked, url, keywords, originalKeywords);
+    batch.set(themeRef.set)
+    const freeCreation = await createFreeTheme(themeRef.ref, user, themeName, originalKeywords, keywords, sellChecked);
+    batch.set(freeCreation.free)
+    batch.commit();
+    res.status(200).json({ done: true });
+  } catch (error) {
+    console.error("Error processing request: ", error);
+    res.status(500).send("Error processing request");
+  }
+});
   app.post('/api/profilenotpostnotsell', async (req, res) => {
       const data = req.body
-      const userId = data.data.user
-      const url = data.data.url
-      const sellChecked = data.data.sellChecked
-      const themeName = data.data.themeName
-      const price = data.data.price
-      const keywords = data.data.keywords
-      const originalKeywords = data.data.originalKeywords
+      const {user, url, sellChecked, themeName, price, keywords, originalKeywords} = data.data
       try {
         const batch = db.batch();
-        const profileRef = db.collection('profiles').doc(userId)
-        const myRef = db.collection('profiles').doc(userId).collection('myThemes').doc()
-        batch.update(profileRef, {
-          background: url,
-          free: Number.parseFloat(price) > 0 ? false : true,
-          forSale: sellChecked ? true: false,
-          credits: FieldValue.increment(-1)
-        })
-        batch.set(myRef, {
-          timestamp: FieldValue.serverTimestamp(),
-          images: FieldValue.arrayUnion(url),
-          active: true,
-          name: themeName.trim(),
-          keywords: originalKeywords,
-          searchKeywords: keywords,
-          bought: false,
-          price: Number.parseFloat(price),
-          forSale: sellChecked ? true: false,
-        })
+        const themeCreation = await createTheme(user, themeName, price, sellChecked, url, keywords, originalKeywords)
+        batch.set(themeCreation.set)
+        batch.update(await updateProfile(false, true, user, url, themeName, price, sellChecked));
         await batch.commit();
         res.status(200).json({ done: true });
       }
@@ -798,51 +795,14 @@ app.post('/api/uploadStory', async(req, res) => {
     })
   app.post('/api/sellprofilepost', async (req, res) => {
       const data = req.body
-      const userId = data.data.user
-      const url = data.data.url
-      const sellChecked = data.data.sellChecked
-      const themeName = data.data.themeName
-      const price = data.data.price
-      const keywords = data.data.keywords
-      const originalKeywords = data.data.originalKeywords
+      const {user, url, sellChecked, themeName, price, keywords, originalKeywords} = data.data
       try {
         const batch = db.batch();
-        const profileRef = db.collection('profiles').doc(userId)
-        const docRef = db.collection('profiles').doc(userId).collection('myThemes').doc()
-        const freeRef = db.collection('freeThemes').doc(docRef.id)
-        batch.update(profileRef, {
-          background: url,
-          postBackground: url,
-          forSale: sellChecked ? true: false,
-          postBought: sellChecked ? true: false,
-          free: Number.parseFloat(price) > 0 ? false : true,
-          themeName: themeName.trim(),
-          credits: FieldValue.increment(-1)
-        })
-        batch.set(docRef, {
-          timestamp: FieldValue.serverTimestamp(),
-          images: FieldValue.arrayUnion(url),
-          active: true,
-          name: themeName.trim(),
-          keywords: originalKeywords,
-          searchKeywords: keywords,
-          bought: false,
-          forSale: sellChecked ? true: false,
-          price: Number.parseFloat(price),
-        })
-        batch.set(freeRef, {
-          timestamp: FieldValue.serverTimestamp(),
-          images: FieldValue.arrayUnion(url),
-          active: true,
-          name: themeName.trim(),
-          keywords: originalKeywords,
-          searchKeywords: keywords,
-          bought: false,
-          forSale: sellChecked ? true: false,
-          bought_count: 0,
-          userId: userId,
-          stripe_metadata_price: 0
-        })
+        batch.update(await updateProfile(true, true, user, url, themeName, price, sellChecked))
+        const themeRef = await createTheme(user, themeName, price, sellChecked, url, keywords, originalKeywords);
+        batch.set(themeRef.set)
+        const freeCreation = await createFreeTheme(themeRef.ref, user, themeName, originalKeywords, keywords, sellChecked);
+        batch.set(freeCreation.free)
         await batch.commit();
         res.status(200).json({ done: true });
       } 
@@ -853,46 +813,14 @@ app.post('/api/uploadStory', async(req, res) => {
     })
 app.post('/api/sellnotprofilenotpost', async (req, res) => {
   const data = req.body;
-  const userId = data.data.user;
-  const url = data.data.url;
-  const sellChecked = data.data.sellChecked;
-  const themeName = data.data.themeName;
-  const price = data.data.price;
-  const keywords = data.data.keywords;
-  const originalKeywords = data.data.originalKeywords;
-
+  const {user, url, sellChecked, themeName, price, keywords, originalKeywords} = data.data
   try {
     const batch = db.batch();
-    const freeRef = db.collection('freeThemes').doc()
-    const myRef = db.collection('profiles').doc(userId).collection('myThemes').doc()
-    const profileRef = db.collection('profiles').doc(userId)
-    batch.set(freeRef, {
-      timestamp: FieldValue.serverTimestamp(),
-      images: FieldValue.arrayUnion(url),
-      userId: userId,
-      active: true,
-      name: themeName.trim(),
-      keywords: originalKeywords,
-      searchKeywords: keywords,
-      bought: false,
-      forSale: sellChecked ? true : false,
-      bought_count: 0,
-      stripe_metadata_price: 0
-    })
-    batch.set(myRef, {
-      timestamp: FieldValue.serverTimestamp(),
-      images: FieldValue.arrayUnion(url),
-      active: true,
-      name: themeName.trim(),
-      keywords: originalKeywords,
-      searchKeywords: keywords,
-      bought: false,
-      price: Number.parseFloat(price),
-      forSale: sellChecked ? true : false
-    })
-    batch.update(profileRef, {
-      credits: FieldValue.increment(-1)
-    })
+    batch.update(await updateProfile(false, false, user, url, themeName, price, sellChecked))
+    const themeRef = await createTheme(user, themeName, price, sellChecked, url, keywords, originalKeywords);
+    batch.set(themeRef.set)
+    const freeCreation = await createFreeTheme(themeRef.ref, user, themeName, originalKeywords, keywords, sellChecked);
+    batch.set(freeCreation.free)
     await batch.commit();
     res.status(200).json({ done: true });
   } catch (error) {
@@ -902,31 +830,12 @@ app.post('/api/sellnotprofilenotpost', async (req, res) => {
 });
 app.post('/api/notsellnotprofilenotpost', async (req, res) => {
     const data = req.body
-    const userId = data.data.user
-    const url = data.data.url
-    const sellChecked = data.data.sellChecked
-    const themeName = data.data.themeName
-    const price = data.data.price
-    const keywords = data.data.keywords
-    const originalKeywords = data.data.originalKeywords
+    const {user, url, sellChecked, themeName, price, keywords, originalKeywords} = data.data
     try {
       const batch = db.batch();
-      const myRef = db.collection('profiles').doc(userId).collection('myThemes').doc()
-      const profileRef = db.collection('profiles').doc(userId)
-      batch.set(myRef, {
-        timestamp: FieldValue.serverTimestamp(),
-        images: FieldValue.arrayUnion(url),
-        active: true,
-        name: themeName.trim(),
-        keywords: originalKeywords,
-        searchKeywords: keywords,
-        bought: false,
-        price: Number.parseFloat(price),
-        forSale: sellChecked ? true: false
-      })
-      batch.update(profileRef, {
-        credits: FieldValue.increment(-1)
-      })
+      const themeCreation = await createTheme(user, themeName, price, sellChecked, url, keywords, originalKeywords)
+      batch.set(themeCreation.set)
+      batch.update(await updateProfile(false, false, user, url, themeName, price, sellChecked));
       await batch.commit();
       res.status(200).json({ done: true });
     } catch (error) {
@@ -934,758 +843,261 @@ app.post('/api/notsellnotprofilenotpost', async (req, res) => {
       res.status(500).send("Error")
     }
   })
-app.post('/api/newReplyToReplyVideo', async(req, res) => {
-  const data = req.body
-  const focusedPost = data.data.focusedPost
-  const tempCommentId = data.data.tempCommentId
-  const newReply = data.data.newReply
-  const commentSnap = data.data.commentSnap
-  const reply = data.data.reply
-  const userId = data.data.user
-  const username = data.data.username
-  const textModerationURL = data.data.textModerationURL
-  const formData = new FormData();
-    formData.append('text', newReply.reply);
-    formData.append('lang', 'en');
-    formData.append('mode', 'standard');
-    formData.append('api_user', `${MODERATION_API_USER}`);
-    formData.append('api_secret', `${MODERATION_API_SECRET}`);
-  
-    Promise.all([axios({
-      url: `${textModerationURL}`,
-      method:'post',
-      data: formData,
-  })]).then(async(response) => {
-    if (response[0].data) {
-      if (response[0].data.link.matches.length > 0) {
-       res.send({link: true})
-    }
-    else if (response[0].data.profanity.matches.length > 0) {
-      const containsValue = response[0].data.profanity.matches.some(obj => obj.intensity === 'high');
-    if (containsValue) {
-        res.send({profanity: true})
-    }
-    }
-    else {
-      try {
-              // Initialize a Firestore batch
-          const batch = db.batch();
-          const commentDocRef = db
-                  .collection('videos')
-                  .doc(focusedPost.id)
-                  .collection('comments')
-                  .doc(tempCommentId);
-          // Reference to the video document
-          const videoDocRef = db.collection('videos').doc(focusedPost.id);
-          const profileRef = db.collection('profiles').doc(commentSnap.user).collection('notifications').doc()
-          const profileCheckRef = db.collection('profiles').doc(commentSnap.user).collection('checkNotifications').doc()
-          batch.update(commentDocRef, {
-              replies: FieldValue.arrayUnion(newReply),
-          });
-          batch.update(videoDocRef, {
-              comments: FieldValue.increment(1),
-          });
-          batch.set(profileRef, {
-              like: false,
-              reply: true,
-              friend: false,
-              item: reply,
-              request: false,
-              acceptRequest: false,
-              postId: focusedPost.id, 
-              theme: false,
-              report: false,
-              requestUser: userId,
-              requestNotificationToken: focusedPost.notificationToken,
-              likedBy: username,
-              timestamp: FieldValue.serverTimestamp()
-          })
-          batch.set(profileCheckRef, {
-              userId: userId
-          })
-          await batch.commit();
-          res.status(200).json({ done: true });
-        } catch (error) {
-          console.error(error)
-          res.status(500).json({ error: 'Failed to add reply to comment.' });
-        }
-    }
-  } else {
-    res.send({error: true})
-  }
-})
-})
-app.post('/api/newReplyToReplyUsername', async(req, res) => {
-  const data = req.body
-  const focusedPost = data.data.focusedPost
-  const tempCommentId = data.data.tempCommentId
-  const newReply = data.data.newReply
-  const textModerationURL = data.data.textModerationURL
-  const formData = new FormData();
-    formData.append('text', newReply.reply);
-    formData.append('lang', 'en');
-    formData.append('mode', 'standard');
-    formData.append('api_user', `${MODERATION_API_USER}`);
-    formData.append('api_secret', `${MODERATION_API_SECRET}`);
-  
-    Promise.all([axios({
-      url: `${textModerationURL}`,
-      method:'post',
-      data: formData,
-  })]).then(async(response) => {
-    if (response[0].data) {
-      if (response[0].data.link.matches.length > 0) {
-       res.send({link: true})
-    }
-    else if (response[0].data.profanity.matches.length > 0) {
-      const containsValue = response[0].data.profanity.matches.some(obj => obj.intensity === 'high');
-    if (containsValue) {
-        res.send({profanity: true})
-    }
-    }
-    else {
-      try {
-        const batch = db.batch();
-        const commentRef = db.collection('posts').doc(focusedPost.id).collection('comments').doc(tempCommentId)
-        const postRef = db.collection('posts').doc(focusedPost.id)
-        batch.update(commentRef, {
-          replies: FieldValue.arrayUnion(newReply)
-        })
-        batch.update(postRef, {
-          comments: FieldValue.increment(1)
-        })
-        await batch.commit();
-        res.status(200).json({ done: true});
-      }
-      catch (error) {
-        console.error(error);
-        res.status(500).send({error: true});
-      }
-    }
-  } else {
-    res.send({error: true})
-  }
-})
-})
-app.post('/api/newReplyToReplyVideoUsername', async(req, res) => {
-  const data = req.body
-  const focusedPost = data.data.focusedPost
-  const tempCommentId = data.data.tempCommentId
-  const newReply = data.data.newReply
-  const textModerationURL = data.data.textModerationURL
-  const formData = new FormData();
-    formData.append('text', newReply.reply);
-    formData.append('lang', 'en');
-    formData.append('mode', 'standard');
-    formData.append('api_user', `${MODERATION_API_USER}`);
-    formData.append('api_secret', `${MODERATION_API_SECRET}`);
-  
-    Promise.all([axios({
-      url: `${textModerationURL}`,
-      method:'post',
-      data: formData,
-  })]).then(async(response) => {
-    if (response[0].data) {
-      if (response[0].data.link.matches.length > 0) {
-       res.send({link: true})
-    }
-    else if (response[0].data.profanity.matches.length > 0) {
-      const containsValue = response[0].data.profanity.matches.some(obj => obj.intensity === 'high');
-    if (containsValue) {
-        res.send({profanity: true})
-    }
-    }
-    else {
-      try {
-              // Initialize a Firestore batch
-              const batch = db.batch();
-              // Reference to the specific comment document
-              const commentDocRef = db
-                  .collection('videos')
-                  .doc(focusedPost.id)
-                  .collection('comments')
-                  .doc(tempCommentId);
-              // Reference to the video document
-              const videoDocRef = db.collection('videos').doc(focusedPost.id);
-              // Add update operations to the batch
-              batch.update(commentDocRef, {
-                  replies: FieldValue.arrayUnion(newReply),
-              });
-              batch.update(videoDocRef, {
-                  comments: FieldValue.increment(1),
-              });
-      
-              // Commit the batch
-              await batch.commit();
-              res.status(200).json({ done: true });
-          } catch (error) {
-              console.error('Error adding reply to comment:', error);
-              res.status(500).json({ error: 'Failed to add reply to comment.' });
-          }
-    }
-  } else {
-    res.send({error: true})
-
-  }
-})
-})
-app.post('/api/newReplyToReply', async(req, res) => {
-  const data = req.body
-  const focusedPost = data.data.focusedPost
-  const tempCommentId = data.data.tempCommentId
-  const newReply = data.data.newReply
-  const commentSnap = data.data.commentSnap
-  const reply = data.data.reply
-  const userId = data.data.user
-  const username = data.data.username
-  const textModerationURL = data.data.textModerationURL
-  const formData = new FormData();
-    formData.append('text', newReply.reply);
-    formData.append('lang', 'en');
-    formData.append('mode', 'standard');
-    formData.append('api_user', `${MODERATION_API_USER}`);
-    formData.append('api_secret', `${MODERATION_API_SECRET}`);
-  
-    Promise.all([axios({
-      url: `${textModerationURL}`,
-      method:'post',
-      data: formData,
-  })]).then(async(response) => {
-    if (response[0].data) {
-      if (response[0].data.link.matches.length > 0) {
-       res.send({link: true})
-    }
-    else if (response[0].data.profanity.matches.length > 0) {
-      const containsValue = response[0].data.profanity.matches.some(obj => obj.intensity === 'high');
-    if (containsValue) {
-        res.send({profanity: true})
-    }
-    }
-    else {
-      try {
-    const batch = db.batch();
-    console.log(reply)
-    const postCommentRef = db.collection('posts').doc(focusedPost.id).collection('comments').doc(tempCommentId)
-    const postRef = db.collection('posts').doc(focusedPost.id)
-    const profileRef = db.collection('profiles').doc(commentSnap.user).collection('notifications').doc()
-    const profileCheckRef = db.collection('profiles').doc(commentSnap.user).collection('checkNotifications').doc()
-    batch.update(postCommentRef, {
-        replies: FieldValue.arrayUnion(newReply)
-    })
-    batch.update(postRef, {
-        comments: FieldValue.increment(1)
-    })
-    batch.set(profileRef, {
-        like: false,
-        reply: true,
-        friend: false,
-        item: reply,
-        request: false,
-        acceptRequest: false,
-        postId: focusedPost.id,
-        theme: false,
-        report: false,
-        requestUser: userId,
-        requestNotificationToken: focusedPost.notificationToken,
-        likedBy: username,
-        timestamp: FieldValue.serverTimestamp()
-    })
-    batch.set(profileCheckRef, {
-        userId: userId
-    })
-    await batch.commit();
-    res.status(200).json({ done: true });
-  }
-  catch (error) {
-    console.error(error)
-    res.status(500).json({ error: 'Failed to add reply to comment.' });
-  }
-    }
-  } else {
-    res.send({error: true})
-  }
-})
-})
-
 app.post('/api/addFriend', async(req,res) => {
-              const data = req.body
-              const newFriend = data.data.newFriend
-              const item = data.data.item
-              const username = data.data.username
-              const smallKeywords = data.data.smallKeywords
-              const largeKeywords = data.data.largeKeywords
-              const userId = data.data.user
-              let privacy = (await db.collection('profiles').doc(item.userId).get()).data().private
-              let friendUsername = (await db.collection('profiles').doc(item.userId).get()).data().searchusername
-              let friendSmallkeywords = (await db.collection('profiles').doc(item.userId).get()).data().smallKeywords
-              let friendLargekeywords = (await db.collection('profiles').doc(item.userId).get()).data().largeKeywords
-              let existingUserFriend = (await db.collection('profiles').doc(userId).collection('friends').doc(item.userId).get())
-              let existingFriend = (await db.collection('profiles').doc(item.userId).collection('friends').doc(userId).get())
-              let message = (await db.collection('friends').doc(newFriend).get())
-              if (existingUserFriend.exists && existingFriend.exists) {
-                if (existingUserFriend.data().actualFriend == false && existingFriend.data().actualFriend == true) {
-                  if (privacy) {
-                    await db.collection('profiles').doc(userId).collection('requests').doc(item.userId).set({
-                      id: item.userId,
-                    actualRequest: true,
-                    timestamp: FieldValue.serverTimestamp()
-                    }).then(async() => await db.collection('profiles').doc(item.userId).collection('requests').doc(userId).set({
-                    id: userId,
-                    actualRequest: false,
-                    timestamp: FieldValue.serverTimestamp()
-                  })).then(() => db.collection('profiles').doc(item.userId).collection('notifications').add({
-                    like: false,
-                    comment: false,
-                    friend: true,
-                    item: null,
-                    request: true,
-                    acceptRequest: false,
-                    postId: item.id,
-                    theme: false,
-                    report: false,
-                    requestUser: userId,
-                    requestNotificationToken: item.notificationToken,
-                    likedBy: [],
-                    timestamp: FieldValue.serverTimestamp()
-                  })).then(() => db.collection('profiles').doc(item.userId).collection('checkNotifications').add({
-                    userId: item.userId
-                  }))
-                 res.send({ request: true, friend: false })
-                  }
-                  else if (!privacy) {
-                    await db.collection('profiles').doc(userId).collection('friends').doc(item.userId).set({
-                    friendId: newFriend,
-                    actualFriend: true,
-                    searchusername: friendUsername,
-                    smallKeywords: friendSmallkeywords,
-                    largeKeywords: friendLargekeywords,
-                    previousFriend: true,
-                    timestamp: FieldValue.serverTimestamp(),
-                    lastMessageTimestamp: FieldValue.serverTimestamp(),
-                  }).then(async() => await db.collection('profiles').doc(item.userId).collection('friends').doc(userId).set({
-                    friendId: newFriend,
-                    actualFriend: true,
-                    searchusername: username.toLowerCase(),
-                    smallKeywords: smallKeywords,
-                    largeKeywords: largeKeywords,
-                    previousFriend: true,
-                    timestamp: FieldValue.serverTimestamp(),
-                    lastMessageTimestamp: FieldValue.serverTimestamp()
-                  })).then(message.exists ? async() => await db.collection('friends').doc(newFriend).update({
-                      active: true,
-                      users: [item.userId, userId]
-                    }) : async() => await db.collection('friends').doc(newFriend).set({
-                      lastMessageTimestamp: FieldValue.serverTimestamp(),
-                      active: true,
-                      users: [item.userId, userId]
-                    })).then(() => db.collection('profiles').doc(item.userId).collection('notifications').add({
-                    like: false,
-                    comment: false,
-                    friend: true,
-                    item: null,
-                    request: false,
-                    acceptRequest: false,
-                    postId: null,
-                    theme: false,
-                    report: false,
-                    requestUser: userId,
-                    requestNotificationToken: item.notificationToken,
-                    likedBy: [],
-                    timestamp: FieldValue.serverTimestamp()
-                  })).then(() => db.collection('profiles').doc(item.userId).collection('checkNotifications').add({
-                    userId: item.userId
-                  })).then(async() => await db.collection('profiles').doc(userId).update({
-                    following: FieldValue.arrayUnion(item.userId)
-                  })).then(async() => await db.collection('profiles').doc(item.userId).update({
-                    followers: FieldValue.arrayUnion(userId)
-                  }))
-                 res.send({ request: false, friend: true })
-                  }
-                    
-                    }
-                else if (existingUserFriend.data().actualFriend == false && existingFriend.data().actualFriend == false) {
-                  if (privacy) {
-                    await db.collection('profiles').doc(userId).collection('requests').doc(item.userId).set({
-                    id: item.userId,
-                    actualRequest: true,
-                    timestamp: FieldValue.serverTimestamp()
-                  }).then(async() => await db.collection('profiles').doc(item.userId).collection('requests').doc(userId).set({
-                    id: userId,
-                    actualRequest: false,
-                    timestamp: FieldValue.serverTimestamp()
-                  })).then(() => db.collection('profiles').doc(item.userId).collection('notifications').add({
-                    like: false,
-                    comment: false,
-                    friend: true,
-                    item: null,
-                    request: true,
-                    acceptRequest: false,
-                    postId: item.id,
-                    theme: false,
-                    report: false,
-                    requestUser: userId,
-                    requestNotificationToken: item.notificationToken,
-                    likedBy: [],
-                    timestamp: FieldValue.serverTimestamp()
-                  })).then(() => db.collection('profiles').doc(item.userId).collection('checkNotifications').add({
-                    userId: item.userId
-                  }))
-                 res.send({ request: true, friend: false })
-                  }
-                  else if (!privacy) {
-                    
-                       await db.collection('profiles').doc(userId).collection('friends').doc(item.userId).set({
-                    friendId: newFriend,
-                    actualFriend: true,
-                    previousFriend: true,
-                    timestamp: FieldValue.serverTimestamp(),
-                    lastMessageTimestamp: FieldValue.serverTimestamp()
-                  }).then(async() => await db.collection('profiles').doc(item.userId).collection('friends').doc(userId).set({
-                    friendId: newFriend,
-                    actualFriend: false,
-                    previousFriend: true,
-                    timestamp: FieldValue.serverTimestamp(),
-                    lastMessageTimestamp: FieldValue.serverTimestamp()
-                  })).then(async() => await db.collection('profiles').doc(userId).update({
-                    following: FieldValue.arrayUnion(item.userId)
-                  })).then(async() => await db.collection('profiles').doc(item.userId).update({
-                    followers: FieldValue.arrayUnion(userId)
-                  })).then(() => db.collection('profiles').doc(item.userId).collection('notifications').add({
-                    like: false,
-                    comment: false,
-                    friend: true,
-                    item: null,
-                    request: false,
-                    acceptRequest: false,
-                    postId: item.id,
-                    theme: false,
-                    report: false,
-                    requestUser: userId,
-                    requestNotificationToken: item.notificationToken,
-                    likedBy: [],
-                    timestamp: FieldValue.serverTimestamp()
-                  })).then(() => db.collection('profiles').doc(item.userId).collection('checkNotifications').add({
-                    userId: item.userId
-                  }))
-                 res.send({ request: false, friend: true })
-                  }
-                }
-                  }
-              else {
-                if (privacy) {
-                    await db.collection('profiles').doc(userId).collection('requests').doc(item.userId).set({
-                    id: item.userId,
-                    actualRequest: true,
-                    timestamp: FieldValue.serverTimestamp()
-                  }).then(async() => await db.collection('profiles').doc(item.userId).collection('requests').doc(userId).set({
-                    id: userId,
-                    actualRequest: false,
-                    timestamp: FieldValue.serverTimestamp()
-                  })).then(() => db.collection('profiles').doc(item.userId).collection('notifications').add({
-                    like: false,
-                    comment: false,
-                    friend: true,
-                    item: null,
-                    request: true,
-                    acceptRequest: false,
-                    postId: item.id,
-                    theme: false,
-                    report: false,
-                    requestUser: userId,
-                    requestNotificationToken: item.notificationToken,
-                    likedBy: [],
-                    timestamp: FieldValue.serverTimestamp()
-                  })).then(() => db.collection('profiles').doc(item.userId).collection('checkNotifications').add({
-                    userId: item.userId
-                  }))
-                 res.send({ request: true, friend: false })
-                  }
-                  else if (!privacy) {
-                        await db.collection('profiles').doc(userId).collection('friends').doc(item.userId).set({
-                    friendId: newFriend,
-                    actualFriend: true,
-                    previousFriend: false,
-                    timestamp: FieldValue.serverTimestamp(),
-                    lastMessageTimestamp: FieldValue.serverTimestamp()
-                  }).then(async() => await db.collection('profiles').doc(item.userId).collection('friends').doc(userId).set({
-                    friendId: newFriend,
-                    actualFriend: false,
-                    previousFriend: true,
-                    timestamp: FieldValue.serverTimestamp(),
-                    lastMessageTimestamp: FieldValue.serverTimestamp()
-                  })).then(async() => await db.collection('profiles').doc(userId).update({
-                    following: FieldValue.arrayUnion(item.userId)
-                  })).then(async() => await db.collection('profiles').doc(item.userId).update({
-                    followers: FieldValue.arrayUnion(userId)
-                  })).then(() => db.collection('profiles').doc(item.userId).collection('notifications').add({
-                    like: false,
-                    comment: false,
-                    friend: true,
-                    item: null,
-                    request: false,
-                    acceptRequest: false,
-                    postId: item.id,
-                    theme: false,
-                    report: false,
-                    requestUser: userId,
-                    requestNotificationToken: item.notificationToken,
-                    likedBy: [],
-                    timestamp: FieldValue.serverTimestamp()
-                  })).then(() => db.collection('profiles').doc(item.userId).collection('checkNotifications').add({
-                    userId: item.userId
-                  }))
-                 res.send({ request: false, friend: true })
-                      }
-              }
-            })
-app.post('/api/addFriendTwo', async(req,res) => {
-              const data = req.body
-              const newFriend = data.data.newFriend
-              const item = data.data.item
-              const userId = data.data.user
-              const username = data.data.username
-              const largeKeywords = data.data.largeKeywords
-              const smallKeywords = data.data.smallKeywords
-              let privacy = (await db.collection('profiles').doc(item.id).get()).data().private
-              let friendUsername = (await db.collection('profiles').doc(item.id).get()).data().searchusername
-              let friendSmallkeywords = (await db.collection('profiles').doc(item.id).get()).data().smallKeywords
-              let friendLargekeywords = (await db.collection('profiles').doc(item.id).get()).data().largeKeywords
-              let existingUserFriend = (await db.collection('profiles').doc(userId).collection('friends').doc(item.id).get())
-              let existingFriend = (await db.collection('profiles').doc(item.id).collection('friends').doc(userId).get())
-              let message = (await db.collection('friends').doc(newFriend).get())
-              if (existingUserFriend.exists && existingFriend.exists) {
-                if (existingUserFriend.data().actualFriend == false && existingFriend.data().actualFriend == true) {
-                  if (privacy) {
-                    await db.collection('profiles').doc(userId).collection('requests').doc(item.id).set({
-                      id: item.id,
-                    actualRequest: true,
-                    timestamp: FieldValue.serverTimestamp()
-                    }).then(async() => await db.collection('profiles').doc(item.id).collection('requests').doc(userId).set({
-                    id: userId,
-                    actualRequest: false,
-                    timestamp: FieldValue.serverTimestamp()
-                  })).then(() => db.collection('profiles').doc(item.id).collection('notifications').add({
-                    like: false,
-                    comment: false,
-                    friend: true,
-                    item: null,
-                    request: true,
-                    acceptRequest: false,
-                    postId: item.id,
-                    theme: false,
-                    report: false,
-                    requestUser: userId,
-                    requestNotificationToken: item.notificationToken,
-                    likedBy: [],
-                    timestamp: FieldValue.serverTimestamp()
-                  })).then(() => db.collection('profiles').doc(item.id).collection('checkNotifications').add({
-                    userId: item.id
-                  }))
-                  res.send({ request: true, friend: false })
-                   // Explicitly return the object
-                  }
-                  else if (!privacy) {
-                    await db.collection('profiles').doc(userId).collection('friends').doc(item.id).set({
-                    friendId: newFriend,
-                    actualFriend: true,
-                    searchusername: friendUsername,
-                    smallKeywords: friendSmallkeywords,
-                    largeKeywords: friendLargekeywords,
-                    previousFriend: true,
-                    timestamp: FieldValue.serverTimestamp(),
-                    lastMessageTimestamp: FieldValue.serverTimestamp(),
-                  }).then(async() => await db.collection('profiles').doc(item.id).collection('friends').doc(userId).set({
-                    friendId: newFriend,
-                    actualFriend: true,
-                    searchusername: username.toLowerCase(),
-                    smallKeywords: smallKeywords,
-                    largeKeywords: largeKeywords,
-                    previousFriend: true,
-                    timestamp: FieldValue.serverTimestamp(),
-                    lastMessageTimestamp: FieldValue.serverTimestamp()
-                  })).then(message.exists ? async() => await db.collection('friends').doc(newFriend).update({
-                      active: true,
-                      users: [item.id, userId]
-                    }) : await db.collection('friends').doc(newFriend).set({
-                      lastMessageTimestamp: FieldValue.serverTimestamp(),
-                      active: true,
-                      users: [item.id, userId]
-                    })).then(() => db.collection('profiles').doc(item.id).collection('notifications').add({
-                    like: false,
-                    comment: false,
-                    friend: true,
-                    item: null,
-                    request: false,
-                    acceptRequest: false,
-                    postId: null,
-                    theme: false,
-                    report: false,
-                    requestUser: userId,
-                    requestNotificationToken: item.notificationToken,
-                    likedBy: [],
-                    timestamp: FieldValue.serverTimestamp()
-                  })).then(() => db.collection('profiles').doc(item.id).collection('checkNotifications').add({
-                    userId: item.id
-                  })).then(async() => await db.collection('profiles').doc(userId).update({
-                    following: FieldValue.arrayUnion(item.id)
-                  }))
-                  res.send({ request: false, friend: true })
-                   // Explicitly return the object
-                  }
-                    
-                    }
-                else if (existingUserFriend.data().actualFriend == false && existingFriend.data().actualFriend == false) {
-                  if (privacy) {
-                    await db.collection('profiles').doc(userId).collection('requests').doc(item.id).set({
-                    id: item.id,
-                    actualRequest: true,
-                    timestamp: FieldValue.serverTimestamp()
-                  }).then(async() => await db.collection('profiles').doc(item.id).collection('requests').doc(userId).set({
-                    id: userId,
-                    actualRequest: false,
-                    timestamp: FieldValue.serverTimestamp()
-                  })).then(() => db.collection('profiles').doc(item.id).collection('notifications').add({
-                    like: false,
-                    comment: false,
-                    friend: true,
-                    item: null,
-                    request: true,
-                    acceptRequest: false,
-                    postId: item.id,
-                    theme: false,
-                    report: false,
-                    requestUser: userId,
-                    requestNotificationToken: item.notificationToken,
-                    likedBy: [],
-                    timestamp: FieldValue.serverTimestamp()
-                  })).then(() => db.collection('profiles').doc(item.id).collection('checkNotifications').add({
-                    userId: item.id
-                  }))
-                  res.send({ request: true, friend: false })
-                  
-                  }
-                  else if (!privacy) {
-                    
-                       await db.collection('profiles').doc(userId).collection('friends').doc(item.id).set({
-                    friendId: newFriend,
-                    actualFriend: true,
-                    previousFriend: true,
-                    timestamp: FieldValue.serverTimestamp(),
-                    lastMessageTimestamp: FieldValue.serverTimestamp()
-                  }).then(async() => await db.collection('profiles').doc(item.id).collection('friends').doc(userId).set({
-                    friendId: newFriend,
-                    actualFriend: false,
-                    previousFriend: true,
-                    timestamp: FieldValue.serverTimestamp(),
-                    lastMessageTimestamp: FieldValue.serverTimestamp()
-                  })).then(async() => await db.collection('profiles').doc(userId).update({
-                    following: FieldValue.arrayUnion(item.id)
-                  })).then(() => db.collection('profiles').doc(item.id).collection('notifications').add({
-                    like: false,
-                    comment: false,
-                    friend: true,
-                    item: null,
-                    request: false,
-                    acceptRequest: false,
-                    postId: item.id,
-                    theme: false,
-                    report: false,
-                    requestUser: userId,
-                    requestNotificationToken: item.notificationToken,
-                    likedBy: [],
-                    timestamp: FieldValue.serverTimestamp()
-                  })).then(() => db.collection('profiles').doc(item.id).collection('checkNotifications').add({
-                    userId: item.id
-                  })).then(async() => await db.collection('usernames').doc(userId).update({
-                    friend: FieldValue.increment(1)
-                  })).then(() => console.log('second'))
-                  res.send({ request: false, friend: true })
-                  
-                  }
-                }
-                  }
-              else {
-                if (privacy) {
-                    await db.collection('profiles').doc(userId).collection('requests').doc(item.id).set({
-                    id: item.id,
-                    actualRequest: true,
-                    timestamp: FieldValue.serverTimestamp()
-                  }).then(async() => await db.collection('profiles').doc(item.id).collection('requests').doc(userId).set({
-                    id: userId,
-                    actualRequest: false,
-                    timestamp: FieldValue.serverTimestamp()
-                  })).then(() => db.collection('profiles').doc(item.id).collection('notifications').add({
-                    like: false,
-                    comment: false,
-                    friend: true,
-                    item: null,
-                    request: true,
-                    acceptRequest: false,
-                    postId: item.id,
-                    theme: false,
-                    report: false,
-                    requestUser: userId,
-                    requestNotificationToken: item.notificationToken,
-                    likedBy: [],
-                    timestamp: FieldValue.serverTimestamp()
-                  })).then(() => db.collection('profiles').doc(item.id).collection('checkNotifications').add({
-                    userId: item.id
-                  }))
-                 res.send({ request: true, friend: false })
-                  }
-                  else if (!privacy) {
-                        await db.collection('profiles').doc(userId).collection('friends').doc(item.id).set({
-                    friendId: newFriend,
-                    actualFriend: true,
-                    previousFriend: false,
-                    timestamp: FieldValue.serverTimestamp(),
-                    lastMessageTimestamp: FieldValue.serverTimestamp()
-                  }).then(async() => await db.collection('profiles').doc(item.id).collection('friends').doc(userId).set({
-                    friendId: newFriend,
-                    actualFriend: false,
-                    previousFriend: true,
-                    timestamp: FieldValue.serverTimestamp(),
-                    lastMessageTimestamp: FieldValue.serverTimestamp()
-                  })).then(async() => await db.collection('profiles').doc(userId).update({
-                    following: FieldValue.arrayUnion(item.id)
-                  })).then(() => db.collection('profiles').doc(item.id).collection('notifications').add({
-                    like: false,
-                    comment: false,
-                    friend: true,
-                    item: null,
-                    request: false,
-                    acceptRequest: false,
-                    postId: item.id,
-                    theme: false,
-                    report: false,
-                    requestUser: userId,
-                    requestNotificationToken: item.notificationToken,
-                    likedBy: [],
-                    timestamp: FieldValue.serverTimestamp()
-                  })).then(() => db.collection('profiles').doc(item.id).collection('checkNotifications').add({
-                    userId: item.id
-                  })).then(async() => await db.collection('usernames').doc(userId).update({
-                    friends: FieldValue.increment(1)
-                  })).then(() => console.log('third'))
-                  res.send({ request: false, friend: true })
-                      }
-              }
-            })
+    const data = req.body
+    const newFriend = data.data.newFriend
+    const item = data.data.item
+    const username = data.data.username
+    const smallKeywords = data.data.smallKeywords
+    const largeKeywords = data.data.largeKeywords
+    const userId = data.data.user
+    let privacy = (await db.collection('profiles').doc(item.userId).get()).data().private
+    let friendUsername = (await db.collection('profiles').doc(item.userId).get()).data().searchusername
+    let friendSmallkeywords = (await db.collection('profiles').doc(item.userId).get()).data().smallKeywords
+    let friendLargekeywords = (await db.collection('profiles').doc(item.userId).get()).data().largeKeywords
+    let existingUserFriend = (await db.collection('profiles').doc(userId).collection('friends').doc(item.userId).get())
+    let existingFriend = (await db.collection('profiles').doc(item.userId).collection('friends').doc(userId).get())
+    let message = (await db.collection('friends').doc(newFriend).get())
+    if (existingUserFriend.exists && existingFriend.exists) {
+      if (existingUserFriend.data().actualFriend == false && existingFriend.data().actualFriend == true) {
+        if (privacy) {
+          await db.collection('profiles').doc(userId).collection('requests').doc(item.userId).set({
+            id: item.userId,
+          actualRequest: true,
+          timestamp: FieldValue.serverTimestamp()
+          }).then(async() => await db.collection('profiles').doc(item.userId).collection('requests').doc(userId).set({
+          id: userId,
+          actualRequest: false,
+          timestamp: FieldValue.serverTimestamp()
+        })).then(() => db.collection('profiles').doc(item.userId).collection('notifications').add({
+          like: false,
+          comment: false,
+          friend: true,
+          item: null,
+          request: true,
+          acceptRequest: false,
+          postId: item.id,
+          theme: false,
+          report: false,
+          requestUser: userId,
+          requestNotificationToken: item.notificationToken,
+          likedBy: [],
+          timestamp: FieldValue.serverTimestamp()
+        })).then(() => db.collection('profiles').doc(item.userId).collection('checkNotifications').add({
+          userId: item.userId
+        }))
+        res.send({ request: true, friend: false })
+        }
+        else if (!privacy) {
+          await db.collection('profiles').doc(userId).collection('friends').doc(item.userId).set({
+          friendId: newFriend,
+          actualFriend: true,
+          searchusername: friendUsername,
+          smallKeywords: friendSmallkeywords,
+          largeKeywords: friendLargekeywords,
+          previousFriend: true,
+          timestamp: FieldValue.serverTimestamp(),
+          lastMessageTimestamp: FieldValue.serverTimestamp(),
+        }).then(async() => await db.collection('profiles').doc(item.userId).collection('friends').doc(userId).set({
+          friendId: newFriend,
+          actualFriend: true,
+          searchusername: username.toLowerCase(),
+          smallKeywords: smallKeywords,
+          largeKeywords: largeKeywords,
+          previousFriend: true,
+          timestamp: FieldValue.serverTimestamp(),
+          lastMessageTimestamp: FieldValue.serverTimestamp()
+        })).then(message.exists ? async() => await db.collection('friends').doc(newFriend).update({
+            active: true,
+            users: [item.userId, userId]
+          }) : async() => await db.collection('friends').doc(newFriend).set({
+            lastMessageTimestamp: FieldValue.serverTimestamp(),
+            active: true,
+            users: [item.userId, userId]
+          })).then(() => db.collection('profiles').doc(item.userId).collection('notifications').add({
+          like: false,
+          comment: false,
+          friend: true,
+          item: null,
+          request: false,
+          acceptRequest: false,
+          postId: null,
+          theme: false,
+          report: false,
+          requestUser: userId,
+          requestNotificationToken: item.notificationToken,
+          likedBy: [],
+          timestamp: FieldValue.serverTimestamp()
+        })).then(() => db.collection('profiles').doc(item.userId).collection('checkNotifications').add({
+          userId: item.userId
+        })).then(async() => await db.collection('profiles').doc(userId).update({
+          following: FieldValue.arrayUnion(item.userId)
+        })).then(async() => await db.collection('profiles').doc(item.userId).update({
+          followers: FieldValue.arrayUnion(userId)
+        }))
+        res.send({ request: false, friend: true })
+        }
+          
+          }
+      else if (existingUserFriend.data().actualFriend == false && existingFriend.data().actualFriend == false) {
+        if (privacy) {
+          await db.collection('profiles').doc(userId).collection('requests').doc(item.userId).set({
+          id: item.userId,
+          actualRequest: true,
+          timestamp: FieldValue.serverTimestamp()
+        }).then(async() => await db.collection('profiles').doc(item.userId).collection('requests').doc(userId).set({
+          id: userId,
+          actualRequest: false,
+          timestamp: FieldValue.serverTimestamp()
+        })).then(() => db.collection('profiles').doc(item.userId).collection('notifications').add({
+          like: false,
+          comment: false,
+          friend: true,
+          item: null,
+          request: true,
+          acceptRequest: false,
+          postId: item.id,
+          theme: false,
+          report: false,
+          requestUser: userId,
+          requestNotificationToken: item.notificationToken,
+          likedBy: [],
+          timestamp: FieldValue.serverTimestamp()
+        })).then(() => db.collection('profiles').doc(item.userId).collection('checkNotifications').add({
+          userId: item.userId
+        }))
+        res.send({ request: true, friend: false })
+        }
+        else if (!privacy) {
+          
+              await db.collection('profiles').doc(userId).collection('friends').doc(item.userId).set({
+          friendId: newFriend,
+          actualFriend: true,
+          previousFriend: true,
+          timestamp: FieldValue.serverTimestamp(),
+          lastMessageTimestamp: FieldValue.serverTimestamp()
+        }).then(async() => await db.collection('profiles').doc(item.userId).collection('friends').doc(userId).set({
+          friendId: newFriend,
+          actualFriend: false,
+          previousFriend: true,
+          timestamp: FieldValue.serverTimestamp(),
+          lastMessageTimestamp: FieldValue.serverTimestamp()
+        })).then(async() => await db.collection('profiles').doc(userId).update({
+          following: FieldValue.arrayUnion(item.userId)
+        })).then(async() => await db.collection('profiles').doc(item.userId).update({
+          followers: FieldValue.arrayUnion(userId)
+        })).then(() => db.collection('profiles').doc(item.userId).collection('notifications').add({
+          like: false,
+          comment: false,
+          friend: true,
+          item: null,
+          request: false,
+          acceptRequest: false,
+          postId: item.id,
+          theme: false,
+          report: false,
+          requestUser: userId,
+          requestNotificationToken: item.notificationToken,
+          likedBy: [],
+          timestamp: FieldValue.serverTimestamp()
+        })).then(() => db.collection('profiles').doc(item.userId).collection('checkNotifications').add({
+          userId: item.userId
+        }))
+        res.send({ request: false, friend: true })
+        }
+      }
+        }
+    else {
+      if (privacy) {
+          await db.collection('profiles').doc(userId).collection('requests').doc(item.userId).set({
+          id: item.userId,
+          actualRequest: true,
+          timestamp: FieldValue.serverTimestamp()
+        }).then(async() => await db.collection('profiles').doc(item.userId).collection('requests').doc(userId).set({
+          id: userId,
+          actualRequest: false,
+          timestamp: FieldValue.serverTimestamp()
+        })).then(() => db.collection('profiles').doc(item.userId).collection('notifications').add({
+          like: false,
+          comment: false,
+          friend: true,
+          item: null,
+          request: true,
+          acceptRequest: false,
+          postId: item.id,
+          theme: false,
+          report: false,
+          requestUser: userId,
+          requestNotificationToken: item.notificationToken,
+          likedBy: [],
+          timestamp: FieldValue.serverTimestamp()
+        })).then(() => db.collection('profiles').doc(item.userId).collection('checkNotifications').add({
+          userId: item.userId
+        }))
+        res.send({ request: true, friend: false })
+        }
+        else if (!privacy) {
+              await db.collection('profiles').doc(userId).collection('friends').doc(item.userId).set({
+          friendId: newFriend,
+          actualFriend: true,
+          previousFriend: false,
+          timestamp: FieldValue.serverTimestamp(),
+          lastMessageTimestamp: FieldValue.serverTimestamp()
+        }).then(async() => await db.collection('profiles').doc(item.userId).collection('friends').doc(userId).set({
+          friendId: newFriend,
+          actualFriend: false,
+          previousFriend: true,
+          timestamp: FieldValue.serverTimestamp(),
+          lastMessageTimestamp: FieldValue.serverTimestamp()
+        })).then(async() => await db.collection('profiles').doc(userId).update({
+          following: FieldValue.arrayUnion(item.userId)
+        })).then(async() => await db.collection('profiles').doc(item.userId).update({
+          followers: FieldValue.arrayUnion(userId)
+        })).then(() => db.collection('profiles').doc(item.userId).collection('notifications').add({
+          like: false,
+          comment: false,
+          friend: true,
+          item: null,
+          request: false,
+          acceptRequest: false,
+          postId: item.id,
+          theme: false,
+          report: false,
+          requestUser: userId,
+          requestNotificationToken: item.notificationToken,
+          likedBy: [],
+          timestamp: FieldValue.serverTimestamp()
+        })).then(() => db.collection('profiles').doc(item.userId).collection('checkNotifications').add({
+          userId: item.userId
+        }))
+        res.send({ request: false, friend: true })
+            }
+    }
+  })
 app.post('/api/deleteRePost', async(req, res) => {
-  //console.log(req, res)
   const data = req.body
-              const id = data.data.id
-              const userId = data.data.user
-             
-              await db.collection('deletedReposts').doc(id.id).set({
-                info: id,
-                username: id.username,
-                userId: id.userId,
-                timestamp: FieldValue.serverTimestamp()
-              }).then(async() => await db.collection('posts').doc(id.id).delete()).then(async() => 
-                await db.collection('profiles').doc(userId).collection('posts').doc(id.id).delete())
-                res.send({done: true})
-            })
+  const id = data.data.id
+  const userId = data.data.user      
+  try {
+    const batch = db.batch();
+    const deletedRepostsRef = db.collection('deletedReposts').doc(id.id)
+    const postRef = db.collection('posts').doc(id.id).delete()
+    const profileRef = db.collection('profiles').doc(userId).collection('posts').doc(id.id)
+    batch.set(deletedRepostsRef, {
+      info: id,
+      username: id.username,
+      userId: id.userId,
+      timestamp: FieldValue.serverTimestamp()
+    })
+    batch.delete(postRef)
+    batch.delete(profileRef)
+    await batch.commit();
+    res.status(200).json({ done: true })
+  } catch (error) {
+    console.error(error)
+    res.status(500).json({ error: 'Failed to delete repost' });
+  }
+})
 app.post('/api/removeFriend', async (req, res) => {
   const data = req.body
   const friendId = data.data.friendId
@@ -1840,56 +1252,62 @@ app.post('/api/blockUser', async (req, res) => {
   const bio = data.data.bio
   const smallKeywords = data.data.smallKeywords
   const largeKeywords = data.data.largeKeywords
-  await db.collection('profiles').doc(userId).set({
-    firstName: firstName.trim(),
-    lastName: lastName.trim(),
-    userName: userName.trim(),
-    active: true,
-    banned: false,
-    credits: 0,
-    age: age,
-    cliqChatActive: null,
-    suspended: false,
-    pfp: pfp,
-    notificationToken: token,
-    bio: bio.trim(),
-    groupsJoined: [],
-    eventsJoined: [],
-    private: false,
-    messageNotifications: [],
-    messageActive: false,
-    allowNotifications: true,
-    stripeAccountID: null,
-    showStatus: true,
-    paymentMethodID: null,
-    paymentMethodLast4: [],
-    blockedUsers: [],
-    background: null, 
-    forSale: false,
-    postBackground: null,
-    reportedMessages: [],
-    adminGroups: [],
-    customerId: null,
-
-    reportedComments: [],
-    reportedPosts: [],
-    reportedThemes: [],
-    timestamp: FieldValue.serverTimestamp(),
-    activeOnMessage: false,
-    usersThatBlocked: [],
-    bannedFrom: [],
-    searchusername: userName.toLowerCase().trim(),
-    smallKeywords: smallKeywords,
-    largeKeywords: largeKeywords,
-    timestamp: FieldValue.serverTimestamp()
-  }).then(async() => await db.collection('usernames').doc(userId).set({
-    username: userName.trim(),
-    firstName: firstName.trim(),
-    lastName: lastName.trim(),
-    friends: 0,
-    pfp: pfp
-  }))
-  res.send({done: true})
+  try {
+    const batch = db.batch();
+    const profileRef = db.collection('profiles').doc(userId)
+    const usernameRef = db.collection('usernames').doc(userId)
+    batch.set(profileRef, {
+      firstName: firstName.trim(),
+      lastName: lastName.trim(),
+      userName: userName.trim(),
+      active: true,
+      banned: false,
+      credits: 0,
+      age: age,
+      cliqChatActive: null,
+      suspended: false,
+      pfp: pfp,
+      notificationToken: token,
+      bio: bio.trim(),
+      groupsJoined: [],
+      eventsJoined: [],
+      private: false,
+      messageNotifications: [],
+      messageActive: false,
+      allowNotifications: true,
+      stripeAccountID: null,
+      showStatus: true,
+      paymentMethodID: null,
+      paymentMethodLast4: [],
+      blockedUsers: [],
+      background: null, 
+      forSale: false,
+      postBackground: null,
+      reportedMessages: [],
+      adminGroups: [],
+      customerId: null,
+      reportedComments: [],
+      reportedPosts: [],
+      reportedThemes: [],
+      timestamp: FieldValue.serverTimestamp(),
+      activeOnMessage: false,
+      usersThatBlocked: [],
+      bannedFrom: [],
+      searchusername: userName.toLowerCase().trim(),
+      smallKeywords: smallKeywords,
+      largeKeywords: largeKeywords,
+      timestamp: FieldValue.serverTimestamp()
+    })
+    batch.set(usernameRef, {
+      username: userName.trim(),
+    })
+    await batch.commit();
+    res.status(200).json({ done: true });
+  }
+  catch (error) {
+    console.error(error)
+    res.status(500).json({ error: 'Failed to create account.' });
+  }
 })
 app.post('/api/verifyEmail', async(req, res) => {
   const receivedData = req.body;
@@ -2131,12 +1549,6 @@ app.post('/api/videoModeration', async(req, res) => {
 
 app.post('/api/purchaseEndpoint', async(req, res) => {
     const receivedData = req.body;
-    //console.log(receivedData)
-    
-    // Use an existing Customer ID if this is a returning customer.
-    
-        //const stripeTaxResponse = await stripe.tax.calculate(taxData);
-        //taxAmount = stripeTaxResponse.amount;
 
     const customer = await stripe.customers.create();
     const ephemeralKey = await stripe.ephemeralKeys.create(
@@ -2352,12 +1764,7 @@ app.post('/api/text', (req, res) => {
     
 app.post('/api/textNotification', (req, res) => {
   const receivedData = req.body
-  //console.log(receivedData)
-  // Each push token looks like ExponentPushToken[xxxxxxxxxxxxxxxxxxxxxx]
-
-  // Check that all your push tokens appear to be valid Expo push tokens
-
-  // Construct a message (see https://docs.expo.io/push-notifications/sending-notifications/)
+  
   res.send(receivedData)
   let messages = [];
   messages.push({
@@ -2369,18 +1776,12 @@ app.post('/api/textNotification', (req, res) => {
   let chunks = expo.chunkPushNotifications(messages);
     let tickets = [];
     (async () => {
-  // Send the chunks to the Expo push notification service. There are
-  // different strategies you could use. A simple one is to send one chunk at a
-  // time, which nicely spreads the load out over time:
   for (let chunk of chunks) {
     try {
       let ticketChunk = await expo.sendPushNotificationsAsync(chunk);
       console.log(ticketChunk);
       tickets.push(...ticketChunk);
-      // NOTE: If a ticket contains an error code in ticket.details.error, you
-      // must handle it appropriately. The error codes are listed in the Expo
-      // documentation:
-      // https://docs.expo.io/push-notifications/sending-notifications/#individual-errors
+   
     } catch (error) {
       console.error(error);
     }
@@ -2392,11 +1793,6 @@ tickets = [];
 })
 app.post('/api/imageNotification', (req, res) => {
   const receivedData = req.body
-  // Each push token looks like ExponentPushToken[xxxxxxxxxxxxxxxxxxxxxx]
-
-  // Check that all your push tokens appear to be valid Expo push tokens
-
-  // Construct a message (see https://docs.expo.io/push-notifications/sending-notifications/)
   messages.push({
     to: receivedData.pushToken,
     sound: 'default',
@@ -2406,11 +1802,7 @@ app.post('/api/imageNotification', (req, res) => {
 })
 app.post('/api/postNotification', (req, res) => {
   const receivedData = req.body
-  // Each push token looks like ExponentPushToken[xxxxxxxxxxxxxxxxxxxxxx]
 
-  // Check that all your push tokens appear to be valid Expo push tokens
-
-  // Construct a message (see https://docs.expo.io/push-notifications/sending-notifications/)
   messages.push({
     to: receivedData.pushToken,
     sound: 'default',
@@ -2490,11 +1882,6 @@ tickets = [];
 })
 app.post('/api/likeCommentNotification', (req, res) => {
   const receivedData = req.body
-  // Each push token looks like ExponentPushToken[xxxxxxxxxxxxxxxxxxxxxx]
-
-  // Check that all your push tokens appear to be valid Expo push tokens
-
-  // Construct a message (see https://docs.expo.io/push-notifications/sending-notifications/)
   messages.push({
     to: receivedData.pushToken,
     sound: 'default',
@@ -2504,11 +1891,6 @@ app.post('/api/likeCommentNotification', (req, res) => {
 })
 app.post('/api/likePostNotification', (req, res) => {
   const receivedData = req.body
-  // Each push token looks like ExponentPushToken[xxxxxxxxxxxxxxxxxxxxxx]
-
-  // Check that all your push tokens appear to be valid Expo push tokens
-
-  // Construct a message (see https://docs.expo.io/push-notifications/sending-notifications/)
   messages.push({
     to: receivedData.pushToken,
     sound: 'default',
@@ -2518,11 +1900,6 @@ app.post('/api/likePostNotification', (req, res) => {
 })
 app.post('/api/replyNotification', (req, res) => {
   const receivedData = req.body
-  // Each push token looks like ExponentPushToken[xxxxxxxxxxxxxxxxxxxxxx]
-
-  // Check that all your push tokens appear to be valid Expo push tokens
-
-  // Construct a message (see https://docs.expo.io/push-notifications/sending-notifications/)
   messages.push({
     to: receivedData.pushToken,
     sound: 'default',
@@ -2532,11 +1909,6 @@ app.post('/api/replyNotification', (req, res) => {
 })
 app.post('/api/friendNotification', (req, res) => {
   const receivedData = req.body
-  // Each push token looks like ExponentPushToken[xxxxxxxxxxxxxxxxxxxxxx]
-
-  // Check that all your push tokens appear to be valid Expo push tokens
-
-  // Construct a message (see https://docs.expo.io/push-notifications/sending-notifications/)
   messages.push({
     to: receivedData.pushToken,
     sound: 'default',
