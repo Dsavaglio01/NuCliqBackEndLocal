@@ -28,9 +28,9 @@ NuCliqBackEndLocal is in active development, supporting NuCliq’s beta phase (1
 1. Clone: `git clone https://github.com/Dsavaglio01/NuCliqBackEndLocal`
 2. Install: `npm install`
 3. Configure: Add `.env` with API keys (Firebase, GCP, RevenueCat)
-4. Run: `npm start`
+4. Run: `node index.js`
 
 ## API Documentation
-- Example endpoint: `POST /api/auth/register` – Creates user with Firebase JWT.
-- Example endpoint: `GET /api/posts` – Retrieves mood-filtered posts from Firestore.
+- Example endpoint: `POST /api/likePost` – batches POST method and likes post of different user, adds to users 'likes' collection and sends notification to post user.
+- System Diagram (Diagram Goes Here)
 - Full docs: [Postman Collection](https://www.postman.com/example-collection) (planned for Q2 2025)
