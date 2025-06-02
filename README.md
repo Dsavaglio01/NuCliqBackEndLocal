@@ -7,13 +7,12 @@ NuCliqBackEndLocal is in active development, supporting NuCliq’s beta phase (1
 ## Tech Stack
 - Backend: Node.js (async/await, robust error handling), Express
 - Database: Firebase Cloud Firestore (real-time data storage)
-- Integrations: Google Cloud Platform (serverless APIs via Cloud Functions), RevenueCat (subscription transactions), Docker (containerized deployment)
+- Integrations: Google Cloud Platform (serverless APIs via Cloud Functions), RevenueCat/Stripe (subscription transactions)
 
 ## Features
 - RESTful APIs for user authentication (Firebase, Apple/Google Sign-in, JWT-based security)
 - Real-time social interactions (APIs for text/image/video posts, likes, comments, replies, shares, reposts, mentions; powered by Cloud Firestore)
-- Mood-based filtering APIs (algorithm-driven personalization for happy/scary/sad feeds)
-- Payment processing APIs (RevenueCat for one-time payments/subscriptions, secure transactions)
+- Payment processing APIs (RevenueCat/Stripe (in development) for one-time payments/subscriptions, secure transactions)
 - Profile management APIs (bio, name updates, real-time sync via Cloud Firestore)
 - Theme marketplace APIs (Firestore-backed uploads/sharing of wallpapers, credit-based system)
 - Upcoming: Group chat APIs (Firebase Realtime Database integration, Q2 2025)
