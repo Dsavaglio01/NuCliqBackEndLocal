@@ -34,3 +34,6 @@ NuCliqBackEndLocal is in active development, supporting NuCliq’s beta phase (1
 - Example endpoint: `POST /api/likePost` – batches POST method and likes post of different user, adds to users 'likes' collection and sends notification to post user.
 - System Diagram (Diagram Goes Here)
 - Full docs: [Postman Collection](https://www.postman.com/example-collection) (planned for Q2 2025)
+
+## System Diagram
+![System Diagram](docs/NuCliq_Backend.drawio.png)
