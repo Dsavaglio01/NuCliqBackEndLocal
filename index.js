@@ -93,7 +93,8 @@ async function addReplyUsername(data, collectionType) {
     formData.append('mode', 'standard');
     formData.append('api_user', MODERATION_API_USER);
     formData.append('api_secret', MODERATION_API_SECRET);
-    const moderationResult = await moderateText(newComment, textModerationURL);
+    console.log(newReply)
+    const moderationResult = await moderateText(newReply.reply, textModerationURL);
     if (moderationResult.link || moderationResult.profanity) return moderationResult;
     if (moderationResult.error) return moderationResult;
     try {
@@ -121,7 +122,7 @@ async function addReply(data, collectionType) {
     formData.append('mode', 'standard');
     formData.append('api_user', MODERATION_API_USER);
     formData.append('api_secret', MODERATION_API_SECRET);
-    const moderationResult = await moderateText(newComment, textModerationURL);
+    const moderationResult = await moderateText(newReply.reply, textModerationURL);
     if (moderationResult.link || moderationResult.profanity) return moderationResult;
     if (moderationResult.error) return moderationResult;
     try {
@@ -225,7 +226,8 @@ async function addComment(data, collectionType) {
     }
 }
 async function addCommentUsername(data, collectionType) {
-    const { focusedPost, newComment, blockedUsers, notificationToken, userId, username, textModerationURL } = data.data;
+  console.log(collectionType)
+    const { focusedPost, newComment, blockedUsers, pfp, notificationToken, userId, username, textModerationURL } = data.data;
     const formData = new FormData();
     formData.append('text', newComment);
     formData.append('lang', 'en');
@@ -238,8 +240,9 @@ async function addCommentUsername(data, collectionType) {
     try {
 
         const batch = db.batch();
-        const docRef = db.collection(collectionType).doc(focusedPost.id).collection('comments')
+        const docRef = db.collection(collectionType).doc(focusedPost.id).collection('comments').doc()
         const postRef = db.collection(collectionType).doc(focusedPost.id)
+        console.log(`Document Ref: ${docRef.id}`)
         const profileCommentRef = db.collection('profiles').doc(userId).collection('comments').doc(docRef.id)
         batch.set(docRef, {
             comment: newComment,
@@ -273,12 +276,12 @@ async function addCommentUsername(data, collectionType) {
 async function addReplyToReplyUsername(data, collectionType) {
     const { focusedPost, newComment, tempCommentId, textModerationURL, newReply } = data.data;
     const formData = new FormData();
-    formData.append('text', newComment);
+    formData.append('text', newReply.reply);
     formData.append('lang', 'en');
     formData.append('mode', 'standard');
     formData.append('api_user', MODERATION_API_USER);
     formData.append('api_secret', MODERATION_API_SECRET);
-    const moderationResult = await moderateText(newComment, textModerationURL);
+    const moderationResult = await moderateText(newReply.reply, textModerationURL);
     if (moderationResult.link || moderationResult.profanity) return moderationResult;
     if (moderationResult.error) return moderationResult;
     try {
@@ -302,12 +305,12 @@ async function addReplyToReplyUsername(data, collectionType) {
 async function addReplyToReply(data, collectionType) {
     const { focusedPost, newComment, tempCommentId, commentSnap, textModerationURL, reply, newReply, userId, username } = data.data;
     const formData = new FormData();
-    formData.append('text', newComment);
+    formData.append('text', newReply.reply);
     formData.append('lang', 'en');
     formData.append('mode', 'standard');
     formData.append('api_user', MODERATION_API_USER);
     formData.append('api_secret', MODERATION_API_SECRET);
-    const moderationResult = await moderateText(newComment, textModerationURL);
+    const moderationResult = await moderateText(newReply.reply, textModerationURL);
     if (moderationResult.link || moderationResult.profanity) return moderationResult;
     if (moderationResult.error) return moderationResult;
     try {
@@ -1813,6 +1816,78 @@ app.post('/api/endpoint', async (req, res) => {
     res.send({accountLink: accountLink, accountId: account.id})
    //console.log(accountLink)
 });
+app.post('/api/imageModeration', async(req, res) => {
+  const receivedData = req.body;
+  const url = receivedData.url
+  const caption = receivedData.caption
+  const actualPostArray = receivedData.actualPostArray
+  const reference = receivedData.reference
+  const item = receivedData.item
+  const setNewPostArray = receivedData.setNewPostArray
+  const cleanedData = receivedData.cleanedData
+  try {
+    // Fetch Image Moderation Data
+    console.log(IMAGE_MODERATION_URL)
+    const response = await axios.get(IMAGE_MODERATION_URL, {
+      params: {
+        url,
+        models: 'nudity-2.0,wad,offensive,scam,gore,qr-content',
+        api_user: MODERATION_API_USER,
+        api_secret: MODERATION_API_SECRET,
+      },
+    });
+
+    const moderationData = response.data;
+    //const cleanedData = removeUnnecessaryNudityKeys(moderationData.nudity);
+    const containsNumberGreaterThan = (array, threshold) => array.some((element) => element > threshold);
+  
+    const getValuesFromImages = (list) => {
+        let values = [];
+        list.forEach((item) => {
+        if (typeof item === "number") values.push(item);
+        if (typeof item === "object") {
+            Object.values(item).forEach((value) => {
+            if (typeof value === "number") values.push(value);
+            if (typeof value === "object") values = values.concat(getValuesFromImages([value]));
+            });
+        }
+        });
+
+        return values;
+    };
+    //console.log(getValuesFromImages(Object.values(moderationData.nudity)))
+    const moderationFailures = [
+      moderationData.drugs > 0.9,
+      moderationData.gore?.prob > 0.9,
+      containsNumberGreaterThan(getValuesFromImages(Object.values(cleanedData)), 0.95),
+      containsNumberGreaterThan(Object.values(moderationData.offensive), 0.9),
+      moderationData.scam > 0.9,
+      moderationData.weapon > 0.9,
+    ];
+
+    // Handle Caption Text Moderation
+    if (caption.length > 0) {
+      const formData = new FormData();
+      formData.append('text', caption);
+      formData.append('lang', 'en');
+      formData.append('mode', 'rules');
+      formData.append('api_user', MODERATION_API_USER);
+      formData.append('api_secret', MODERATION_API_SECRET);
+
+      const textResponse = await axios.post(process.env.TEXT_MODERATION_URL, formData);
+      const { link, profanity } = textResponse.data;
+    }
+
+    // Update Post Array
+    const updatedArray = actualPostArray.map(obj => ({ ...obj }));
+    const targetIndex = actualPostArray.findIndex(e => e.post === item.post);
+    updatedArray[targetIndex].post = url;
+    setNewPostArray(prevState => [updatedArray[targetIndex], ...prevState]);
+
+  } catch (error) {
+    console.error('Error in content moderation:', error);
+  }
+})
 app.post('/api/videoModeration', async(req, res) => {
     const receivedData = req.body;
     sightengine.check(['nudity-2.0,wad,offensive,scam,gore,qr-content']).video_sync(receivedData.video).then(function(result) {
@@ -2196,4 +2271,3 @@ app.post('/api/friendNotification', (req, res) => {
 app.listen(4000, () => {
   console.log('Server is running on port 4000');
 });
-
