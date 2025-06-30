@@ -5,7 +5,7 @@ const FormData = require('form-data');
 const app = express();
 require('dotenv').config()
 const { MODERATION_API_USER, MODERATION_API_SECRET, STRIPE_TEST_KEY, EXPO_TOKEN, SERVICE_ACCOUNT_PATH,
-  DATABASE_URL, STORAGE_BUCKET, CLIENT_ID, CLIENT_SECRET
+  DATABASE_URL, STORAGE_BUCKET, CLIENT_ID, CLIENT_SECRET, IMAGE_MODERATION_URL, 
 } = process.env;
 const stripe = require('stripe')(STRIPE_TEST_KEY);
 const {Expo} = require('expo-server-sdk')
@@ -62,11 +62,12 @@ const getAccessToken = async () => {
 
 
 app.use(express.json());
-app.use(cors({
+app.use(cors())
+/* app.use(cors({
     origin: 'http://localhost:3000', // Allow requests from this origin
     methods: ['GET', 'POST', 'PUT', 'DELETE'], // Allow these methods
     allowedHeaders: ['Content-Type', 'Authorization'] // Allow these headers
-}));
+})); */
 async function moderateText(text, textModerationURL) {
     const formData = new FormData();
     formData.append('text', text);
@@ -1816,15 +1817,35 @@ app.post('/api/endpoint', async (req, res) => {
     res.send({accountLink: accountLink, accountId: account.id})
    //console.log(accountLink)
 });
+const removeUnnecessaryNudityKeys = (data) => {
+  const keysToRemove = ['none', 'context'];
+
+  const removeKeysRecursively = (obj) => {
+    if (typeof obj !== 'object' || obj === null) {
+      return obj; // Base case: Not an object, return as is
+    }
+
+    // Iterate over object keys
+    for (const key in obj) {
+      if (keysToRemove.includes(key)) {
+        delete obj[key]; // Remove unwanted keys
+      } else if (typeof obj[key] === 'object') {
+        removeKeysRecursively(obj[key]); // Recurse into nested objects
+      }
+    }
+
+    return obj;
+  };
+
+  return removeKeysRecursively(data);
+};
 app.post('/api/imageModeration', async(req, res) => {
+  console.log('Got Here')
   const receivedData = req.body;
   const url = receivedData.url
   const caption = receivedData.caption
   const actualPostArray = receivedData.actualPostArray
-  const reference = receivedData.reference
   const item = receivedData.item
-  const setNewPostArray = receivedData.setNewPostArray
-  const cleanedData = receivedData.cleanedData
   try {
     // Fetch Image Moderation Data
     console.log(IMAGE_MODERATION_URL)
@@ -1838,7 +1859,7 @@ app.post('/api/imageModeration', async(req, res) => {
     });
 
     const moderationData = response.data;
-    //const cleanedData = removeUnnecessaryNudityKeys(moderationData.nudity);
+    const cleanedData = removeUnnecessaryNudityKeys(moderationData.nudity);
     const containsNumberGreaterThan = (array, threshold) => array.some((element) => element > threshold);
   
     const getValuesFromImages = (list) => {
@@ -1874,16 +1895,36 @@ app.post('/api/imageModeration', async(req, res) => {
       formData.append('api_user', MODERATION_API_USER);
       formData.append('api_secret', MODERATION_API_SECRET);
 
-      const textResponse = await axios.post(process.env.TEXT_MODERATION_URL, formData);
+      const textResponse = await axios.post(TEXT_MODERATION_URL, formData);
       const { link, profanity } = textResponse.data;
+      if (link.matches.length > 0) {
+        res.json({
+          setNewPostArray: setNewPostArray,
+          linkError: true,
+          profError: false
+        })
+      }
+
+      if (profanity.matches.some(obj => obj.intensity === 'high')) {
+        res.json({
+          setNewPostArray: setNewPostArray,
+          linkError: false,
+          profError: true
+        })
+      }
     }
 
     // Update Post Array
     const updatedArray = actualPostArray.map(obj => ({ ...obj }));
+    const newPostArray = []
     const targetIndex = actualPostArray.findIndex(e => e.post === item.post);
     updatedArray[targetIndex].post = url;
-    setNewPostArray(prevState => [updatedArray[targetIndex], ...prevState]);
-
+    newPostArray.push(updatedArray[targetIndex])
+    res.json({
+      newPostArray: newPostArray,
+      linkError: false,
+      profError: false
+    })
   } catch (error) {
     console.error('Error in content moderation:', error);
   }
