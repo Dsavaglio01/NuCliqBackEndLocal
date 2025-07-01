@@ -69,6 +69,7 @@ app.use(cors())
     allowedHeaders: ['Content-Type', 'Authorization'] // Allow these headers
 })); */
 async function moderateText(text, textModerationURL) {
+  console.log(textModerationURL)
     const formData = new FormData();
     formData.append('text', text);
     formData.append('lang', 'en');
@@ -82,7 +83,7 @@ async function moderateText(text, textModerationURL) {
         if (response.data?.profanity?.matches.some(obj => obj.intensity === 'high')) return { profanity: true };
         return { approved: true };
     } catch (error) {
-        console.error("Moderation API error:", error.message);
+        console.error("Moderation API error:", error);
         return { error: "Text moderation failed." };
     }
 }
@@ -244,6 +245,7 @@ async function addCommentUsername(data, collectionType) {
         const docRef = db.collection(collectionType).doc(focusedPost.id).collection('comments').doc()
         const postRef = db.collection(collectionType).doc(focusedPost.id)
         console.log(`Document Ref: ${docRef.id}`)
+        console.log(userId)
         const profileCommentRef = db.collection('profiles').doc(userId).collection('comments').doc(docRef.id)
         batch.set(docRef, {
             comment: newComment,
@@ -1618,6 +1620,7 @@ app.post('/api/uploadPost', async(req, res) => {
   const data = req.body
   const { mood, caption, newPostArray, forSale, value, finalMentions, user: userId, pfp, notificationToken, username, blockedUsers, 
     background } = data.data;
+    console.log(data.data)
   try {
     const batch = db.batch();
   if (newPostArray.length == 1 && newPostArray[0].video) {
