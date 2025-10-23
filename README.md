@@ -2,7 +2,7 @@
 Backend API for NuCliq, a social media app with 100+ beta downloads, powering real-time interactions and personalized features. Built with Node.js (async/await), Express, and scalable cloud infrastructure (Firebase, GCP).
 
 ## Status
-NuCliqBackEndLocal is in active development, supporting NuCliq’s beta phase (100+ downloads). Enhancements for group chat and subscription APIs are planned for Q2 2025.
+NuCliqBackEndLocal is in active development, supporting NuCliq’s beta phase (100+ downloads). Enhancements for group chat and subscription APIs are planned for Q4 2025.
 
 ## Tech Stack
 - Backend: Node.js (async/await, robust error handling), Express
@@ -15,8 +15,8 @@ NuCliqBackEndLocal is in active development, supporting NuCliq’s beta phase (1
 - Payment processing APIs (RevenueCat/Stripe (in development) for one-time payments/subscriptions, secure transactions)
 - Profile management APIs (bio, name updates, real-time sync via Cloud Firestore)
 - Theme marketplace APIs (Firestore-backed uploads/sharing of wallpapers, credit-based system)
-- Upcoming: Group chat APIs (Firebase Realtime Database integration, Q2 2025)
-- Upcoming: Enhanced subscription APIs for multi-feature access (Q2 2025)
+- Upcoming: Group chat APIs (Firebase Realtime Database integration, Q4 2025)
+- Upcoming: Enhanced subscription APIs for multi-feature access (Q4 2025)
 
 ## Metrics
 - Supports 100+ daily API requests, with 10K+ monthly requests and 99.9% uptime
@@ -33,4 +33,4 @@ NuCliqBackEndLocal is in active development, supporting NuCliq’s beta phase (1
 ## API Documentation
 - Example endpoint: `POST /api/likePost` – batches POST method and likes post of different user, adds to users 'likes' collection and sends notification to post user.
 - System Diagram (Diagram Goes Here)
-- Full docs: [Postman Collection](https://www.postman.com/example-collection) (planned for Q2 2025)
+- Full docs: [Postman Collection](https://www.postman.com/example-collection) (planned for Q4 2025)
